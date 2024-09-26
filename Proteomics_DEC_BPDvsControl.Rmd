@@ -1,0 +1,1245 @@
+---
+title: "PARADYS Proteomics analysis"
+author: "Fernando Garrido Muñoz"
+date: "`r format(Sys.time(), '%a %d, %b, %Y')`"
+output: html_document
+---
+
+# Load required packages
+
+```{r, warning=FALSE, results='hide', message=FALSE}
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+library(tidyverse)
+library(DEqMS)
+library(factoextra)
+library(FactoMineR)
+library(stringr)
+library(readxl)
+library(writexl)
+library(VIM)
+library(promor)
+library(pcaMethods)
+library(ggplot2)
+library(gplots)
+library(mixOmics)
+library(VennDetail)
+library(kableExtra)
+library(missForest)
+library(gtsummary)
+library(NormalyzerDE)
+library(limma)
+library(pROC)
+
+
+```
+
+# Load and pre-process proteomic data
+
+```{r}
+
+data <- read_excel("NPA_OPT_250424.xlsx")
+data <- as.data.frame(data)
+
+```
+
+## Filter rows which contain NAs
+
+```{r}
+
+# Remove duplicate rows based on Protein.IDs:(no duplicated rows)
+
+data <- data[!duplicated(data$Protein.Ids), ]
+
+# Remove rows with NAs protein IDs
+
+data <- data[!is.na(data$Protein.Ids),]
+
+```
+
+## Rework data frame to select our samples with all protein ids (rows):
+
+```{r}
+
+sample_columns = seq(6,length(data),1)
+df_protein <- data[, sample_columns]
+rownames(df_protein) <- data$Protein.Ids
+df_protein[,c(1:131)] <- apply(df_protein[,c(1:131)],2,
+                        function(x) as.numeric(as.character(x)))
+
+# We must extract only the samples we need 
+
+# Which is the % of NAs?
+
+sum(is.na(df_protein)/prod(dim(df_protein))) *100
+
+# 40.84 %
+
+```
+
+## Order columns in groups (control vs BPD):
+
+### ALL samples
+
+```{r}
+
+samples <- read_excel("inventario_post_procesamiento.xlsx", sheet = "SamplesConditions")
+samples <- as.data.frame(samples)
+samples$jensen_condition <- as.factor(samples$jensen_condition) # turn this data to factor
+# class(samples$jensen_condition) this is used to check if it has correctly changed to factor
+samples$type <- as.factor(samples$type)
+# order_samples <- samples$jensen_condition
+rownames(samples) <- samples$new_sample
+
+# Add a more specific column with condition + type:
+
+samples <- samples %>% mutate(cond_type=case_when(jensen_condition=="control" & type=="NF" ~ "NPA Control",
+                                       jensen_condition=="control" & type=="TQ" ~ "TA Control",
+                                       jensen_condition=="bpd" & type=="NF" ~ "NPA BPD",
+                                       jensen_condition=="bpd" & type=="TQ" ~ "TA BPD",
+                                       jensen_condition=="fallecido" & type=="NF" ~ "NPA BPD",
+                                       jensen_condition=="fallecido" & type=="TQ" ~ "TA BPD"),
+                              cod_centro=case_when(hospital_abrev=="Cádiz" ~ "01",
+                                                   hospital_abrev=="Basurto" ~ "02",
+                                                   hospital_abrev=="Vigo" ~ "03",
+                                                   hospital_abrev=="Girona" ~ "04",
+                                                   hospital_abrev=="Clinic" ~ "05",
+                                                   hospital_abrev=="HGM" ~ "06",
+                                                   hospital_abrev=="León" ~ "07"))
+
+samples$cond_type <- as.factor(samples$cond_type)
+samples <- samples[samples$new_sample %in% colnames(df_protein),]
+
+# Before order, we must keep only the samples we'll need in this experiment:
+
+df_new_prot <- df_protein[,colnames(df_protein) %in% samples$new_sample]
+order <- samples$new_samples
+df_new_prot <- df_new_prot[,order]
+
+```
+
+## Lets work only with the first protein ID (and generate a file):
+
+```{r}
+
+unique_prot <- df_new_prot
+unique_proteins <- gsub(";.*", "", rownames(unique_prot))
+data <- data %>%
+  mutate(Unique_protein= gsub(";.*", "", rownames(unique_prot)),
+         Unique_genes=gsub(";.*", "", Protein.Names))
+unique_prot <- unique_prot[!duplicated(unique_proteins), ]
+rownames(unique_prot) <- gsub(";.*", "", rownames(unique_prot))
+write.table(x = unique_prot,file = "raw_proteins_unique_ord.txt",
+            quote = F,row.names = T,
+            sep = "\t")
+
+```
+
+## Filter NAs: only filter rows which have more than 30% of NAs
+
+```{r}
+
+noNA_prot <- unique_prot[!rowSums(is.na(unique_prot)),]
+
+# 312 proteins left
+
+unique_prot_ok <- unique_prot[!rowSums(is.na(unique_prot)) 
+                                             > ncol(unique_prot)*.3,]
+
+# 1626 proteins left
+
+# Percentage of NAs left:
+
+sum(is.na(unique_prot_ok)/prod(dim(unique_prot_ok))) *100 # 9.85% NAs
+
+
+```
+
+## Filter our original data for further analysis: 
+
+```{r}
+
+filtered_data <- data %>% filter(data$Protein.Ids %in% rownames(unique_prot_ok))
+protein.ids <- filtered_data$Protein.Ids
+
+```
+
+## Impute data using KNN
+
+```{r, eval=FALSE}
+
+prot_knn <- t(unique_prot_ok)
+prot_knn <- kNN(prot_knn, k=2, imp_var = F)
+prot_knn <- t(prot_knn)
+prot_knn <- as.data.frame(prot_knn)
+colnames(prot_knn) <- colnames(unique_prot_ok)
+write.table(prot_knn, file = "data_knn_all.txt", sep = "\t", 
+            col.names = colnames(prot_knn))
+
+```
+
+## log2 transformation:
+
+```{r, results='hide'}
+
+data.knn.all <-read.table(file = "data_knn_all.txt", sep = "\t", header = T,
+                      row.names = 1, check.names = F)
+# sapply(data.knn, class) Numeric class checker
+write.table(x = data.knn.all,file = "Metadata/data_knn_all.tsv",
+            quote = F,row.names = F,
+            sep = "\t")
+protein_log <- log2(data.knn.all)
+protein_log_filter <- protein_log %>% filter_all(all_vars(.<=20))
+
+```
+
+# NF samples analysis (with DEP)
+
+## Set limma levels:
+
+```{r}
+
+samples <- samples %>%
+  arrange(cond_type) %>%
+  mutate(limma_groups=case_when(cond_type=="NPA Control" ~ 0,
+                                cond_type=="NPA BPD" ~ 1))
+```
+
+## Exploratory analysis
+
+### PCA 
+
+#### Required data
+
+```{r}
+
+dim(protein_log_filter)
+protein_matrix <- t(protein_log_filter)
+dim(protein_matrix)
+protein_matrix <- scale(protein_matrix, center = FALSE, scale = TRUE) 
+conditions <- samples$cond_type
+conditions <- factor(conditions, levels=c("NPA BPD", "NPA Control"))
+colors.mixo <- factor(conditions, levels=c("NPA BPD", "NPA Control"), 
+                      labels = c("#FFC20A", "#0C7BDC"))
+summary(conditions)
+
+```
+
+```{r}
+
+set.seed(222)
+
+pca <- pca(protein_matrix,ncomp = 2, center = TRUE, scale = TRUE,
+           max.iter = 100)
+
+plotIndiv(pca, comp = c(1, 2), ind.names = F, 
+          group = conditions,  
+          legend = TRUE, title = 'PCA comp 1 - 2')
+
+svglite::svglite("FIGURAS/PCA.svg")
+plotIndiv(pca, comp = c(1, 2), ind.names = F, 
+          group = conditions,  
+          legend = TRUE, title = 'PCA comp 1 - 2',
+          col.per.group =  c("#FFC20A", "#0C7BDC"))
+dev.off()
+```
+
+### PLS-DA
+
+#### Number of components for PLS-DA
+
+```{r}
+
+plsda.perf <- plsda(protein_matrix, conditions, ncomp = 10)
+perf.plsda <- mixOmics::perf(plsda.perf, validation = 'Mfold', folds = 5,
+                             progressBar = FALSE, nrepeat = 100) 
+svglite::svglite("FIGURAS/NCOMP_PLSDA.svg")
+plot(perf.plsda, overlay = 'measure', sd=TRUE)
+dev.off()
+perf.plsda$choice.ncomp
+
+```
+
+#### Best PLS-DA
+
+```{r}
+
+plsda <- plsda(protein_matrix, conditions, ncomp = 4) # Restrict to 2 components 
+plotVar(plsda, comp = c(1,2), cex = 2) 
+
+```
+
+#### Plot PLS-DA
+
+```{r}
+
+# ellipse= FALSE , if you want to turn on the ellipses, just enter ellipse=TRUE
+
+plotIndiv(plsda , comp = c(1,2),
+          group = conditions, ind.names = FALSE, 
+          ellipse = F, legend = TRUE, title = 'PLSDA comp 1 - 2')
+
+svglite::svglite("FIGURAS/PLSDA.svg")
+plotIndiv(plsda , comp = c(1,2),
+          group = conditions, ind.names = FALSE, 
+          ellipse = F, legend = TRUE, title = 'PLSDA comp 1 - 2',
+          col.per.group =  c("#FFC20A", "#0C7BDC"))
+dev.off()
+
+```
+
+### sPLS-DA
+
+```{r}
+
+protein.splsda <- splsda(protein_matrix, conditions, ncomp = 10) 
+# set ncomp to 10 for performance assessment later
+
+```
+
+#### Plot
+
+```{r, eval=FALSE}
+
+plotIndiv(protein.splsda , comp = 1:2, 
+          group = conditions, ind.names = FALSE, 
+          ellipse = TRUE, 
+          legend = TRUE, title = '(a) PLSDA with confidence ellipses')
+
+background = background.predict(protein.splsda, comp.predicted=2, dist = "max.dist")
+
+plotIndiv(protein.splsda, comp = 1:2,
+          group = conditions, ind.names = FALSE, 
+          background = background, 
+          legend = TRUE, title = " (b) PLSDA with prediction background")
+
+
+```
+
+#### Tuning sPLS-DA
+
+```{r}
+set.seed(222)
+
+perf.splsda.protein <- perf(protein.splsda, validation = "Mfold", 
+                          folds = 5, nrepeat = 100, # Cross Validation
+                          progressBar = FALSE, auc = TRUE) 
+
+plot(perf.splsda.protein, col = color.mixo(5:7), sd = TRUE,
+     legend.position = "horizontal")
+svglite::svglite("FIGURAS/sPLSDA_ncomp.svg")
+plot(perf.splsda.protein, col = color.mixo(5:7), sd = TRUE,
+     legend.position = "horizontal")
+dev.off()
+
+
+perf.splsda.protein$choice.ncomp # Optimal number of components
+
+```
+
+#### Selecting the number of variables
+
+```{r}
+set.seed(222)
+
+list.keepX <- c(1:10,  seq(20, 300, 10))
+
+# Tuning
+
+tune.splsda.protein <- tune.splsda(protein_matrix, conditions, ncomp = 3,
+                                 validation = 'Mfold',
+                                 folds = 5, nrepeat = 100, 
+                                 dist = 'mahalanobis.dist', 
+                                 measure = "BER", 
+                                 test.keepX = list.keepX,
+                                 cpus = 4,
+                                 progressBar = FALSE)
+
+plot(tune.splsda.protein, col = color.jet(3)) 
+svglite::svglite("FIGURAS/tuned_sPLSDA.svg")
+plot(tune.splsda.protein, col = color.jet(3)) 
+dev.off()
+tune.splsda.protein$choice.ncomp$ncomp # Optimal number of components
+tune.splsda.protein$choice.keepX # Optimal variables for each components
+optimal.ncomp <- tune.splsda.protein$choice.ncomp$ncomp
+optimal.keepX <- tune.splsda.protein$choice.keepX[1:optimal.ncomp]
+
+
+```
+
+#### Final sPLS-DA
+
+```{r}
+set.seed(222)
+final.splsda <- splsda(protein_matrix, conditions, 
+                       ncomp = 3,
+                       keepX = optimal.keepX) 
+
+```
+
+##### Individual Plots
+
+```{r, warning=FALSE}
+
+plotIndiv(final.splsda, comp = c(1,2), 
+          group = conditions, ind.names = FALSE, 
+          ellipse = FALSE, legend = TRUE, 
+          title = ' (a) sPLS-DA on proteins, comp 1 & 2')
+
+background = background.predict(final.splsda, comp.predicted=2, dist = "mahalanobis.dist")
+
+plotIndiv(final.splsda, comp = 1:2,
+          group = conditions, ind.names = FALSE, 
+          background = background,
+          legend = TRUE, title = " (b) sPLSDA with prediction background")
+
+svglite::svglite("FIGURAS/sPLSDA_pred_bg.svg")
+plotIndiv(final.splsda, comp = 1:2,
+          group = conditions, ind.names = FALSE, 
+          background = background,
+          legend = TRUE, title = "sPLSDA with prediction background",
+          col.per.group =  c("#FFC20A", "#0C7BDC"))
+dev.off()
+
+```
+
+### Prediction and ROC curves
+
+```{r}
+set.seed(222)
+train <- sample(1:nrow(protein_matrix), 50) 
+test <- setdiff(1:nrow(protein_matrix), train) 
+
+# Training and test data creation:
+
+X.train <- protein_matrix[train, ]
+X.test <- protein_matrix[test,]
+Y.train <- conditions[train]
+Y.test <- conditions[test]
+
+# Traing:
+
+train.splsda.protein <- splsda(X.train, Y.train, ncomp = 3, keepX = optimal.keepX) 
+
+# Test the model:
+
+predict.splsda.protein <- predict(train.splsda.protein, X.test, 
+                                dist = "mahalanobis.dist")
+
+# Predictive Accuracy Comp 1:
+
+predict.comp1 <- predict.splsda.protein$class$mahalanobis.dist[,1]
+table(factor(predict.comp1, levels = levels(conditions)), Y.test)
+
+# Predictive Accuracy Comps 1 & 2:
+
+predict.comp2 <- predict.splsda.protein$class$mahalanobis.dist[,2]
+table(factor(predict.comp2, levels = levels(conditions)), Y.test)
+
+```
+
+#### Plot ROC curve
+
+```{r}
+svglite::svglite("FIGURAS/ROC_1_comp.svg")
+auc.splsda = auroc(final.splsda, roc.comp = 1, print = TRUE)
+dev.off()
+svglite::svglite("FIGURAS/ROC_2_comp.svg")
+auc.splsda2 = auroc(final.splsda, roc.comp = 2, print = TRUE)
+dev.off()
+
+```
+
+#### CI ROC curve
+
+```{r}
+
+pred.final.splsda <- predict(final.splsda, protein_matrix, 
+                                dist = "mahalanobis.dist")
+DiscriminantScoresTable.dim1 <- cbind(as.data.frame(conditions) , as.data.frame(pred.final.splsda$predict[,,"dim1"])) #the number in dimensions depends on the number of components included in your model 
+DiscriminantScoresTable.dim2 <- cbind(as.data.frame(conditions) , as.data.frame(pred.final.splsda$predict[,,"dim2"])) #the number in dimensions depends on the number of components included in your model 
+DiscriminantScoresTable.dim3 <- cbind(as.data.frame(conditions) , as.data.frame(pred.final.splsda$predict[,,"dim3"]))
+
+
+```
+
+```{r}
+library(pROC)
+
+ROC.dim1 <- roc(DiscriminantScoresTable.dim1$conditions, 
+                DiscriminantScoresTable.dim1$`NPA BPD`) 
+
+ROC.dim1$auc # AUC
+
+ci.auc(ROC.dim1$auc) # 95% CI
+
+ROC.dim2 <- roc(DiscriminantScoresTable.dim2$conditions, 
+                DiscriminantScoresTable.dim2$`NPA BPD`) 
+
+ROC.dim2$auc # AUC
+
+ci.auc(ROC.dim2$auc) # 95% CI
+
+ROC.dim3 <- roc(DiscriminantScoresTable.dim3$conditions, 
+                DiscriminantScoresTable.dim3$`NPA BPD`) 
+
+ROC.dim3$auc # AUC
+
+ci.auc(ROC.dim3$auc) # 95% CI
+
+
+```
+
+
+## Protein Differential Expression Analysis
+
+Using limma
+
+Contrasts to perform: 
+
++ Control vs BPD
+
+### Prepare our data
+
+```{r}
+
+experimental.design <- model.matrix(~ -1+factor(samples$limma_groups)) 
+colnames(experimental.design) <- c("Control","BPD")
+linear.fit <- lmFit(protein_log_filter, experimental.design)
+contrast.matrix <- makeContrasts(BPD-Control,
+                                 levels=c("Control","BPD"))
+
+```
+
+### P-values and Fold-Change estimation using *contrast.fit* and *eBayes*
+
+```{r}
+
+contrast.linear.fit <- contrasts.fit(linear.fit, contrast.matrix)
+contrast.results <- eBayes(contrast.linear.fit)
+
+```
+
+### Contrasts
+
+#### Control vs BPD
+
+```{r}
+
+control.bpd <- topTable(contrast.results, number=nrow(protein_log_filter),
+                           coef=1,sort.by="logFC")
+head(control.bpd)
+
+log.fold.change <- control.bpd$logFC
+p.value <- control.bpd$P.Value
+q.value <- control.bpd$adj.P.Val
+protein.ids <- rownames(control.bpd)
+names(log.fold.change) <- protein.ids
+names(p.value) <- protein.ids
+
+dep <- protein.ids[abs(log.fold.change) > 0.58 & p.value < 0.05]
+up.proteins <- protein.ids[log.fold.change > 0.58 & p.value < 0.05]
+down.proteins <- protein.ids[log.fold.change < -0.58 & p.value < 0.05]
+
+length(up.proteins)
+length(down.proteins)
+
+```
+##### Save results
+
+```{r, eval=FALSE}
+
+write.table(dep, file= "NPA_filter/dep_nf.txt", sep = "\t", row.names = F, col.names = F)
+write.table(up.proteins, file= "NPA_filter/up_dep_nf.txt", sep = "\t",row.names = F, col.names = F)
+write.table(down.proteins, file= "NPA_filter/down_dep_nf.txt", sep = "\t",row.names = F, col.names = F)
+
+```
+
+## Analysis of selected proteins after STRING Functional Enrichment Analysis
+
+### Obtention of protein names and additional DEP results table
+
+```{r}
+
+protein.names <- filtered_data$First.Protein.Description[filtered_data$Unique_protein %in%
+                                                           rownames(protein_log_filter[dep,])]
+protein.names <- c(protein.names, "Unknown_1")
+
+id.names <- read_excel("idmapping_2024_07_25.xlsx", col_names = TRUE)
+id.names <- id.names %>% mutate(`protein name` = gsub("\\s.*", "", id.names$`Gene Names`))
+
+clusters.str <- read_excel("./STRING/clusters_DEC_BPD_NPA.xlsx")
+clusters.str <- as.data.frame(clusters.str)
+clusters.str$`protein name`[5] <- "GBA1"
+clusters.table <- merge(id.names, clusters.str, by = "protein name")
+clusters.table <- clusters.table[,-c(3:4, 6:10, 14)]
+control.bpd.names <- control.bpd[dep,]
+rownames(control.bpd.names) <- id.names$`Entry Name`
+
+# Table with relevant information of DEP: 
+
+control.bpd.names.info <- control.bpd.names
+control.bpd.names.info$`Entry Name` <- rownames(control.bpd.names.info)
+dep.info.table <- merge(control.bpd.names.info, id.names, by="Entry Name")
+dep.info.table <- dep.info.table[,c(7,1,14,9:10,2:6)]
+colnames(dep.info.table)[1:3] <- c("Protein ID", "Uniprot Name", "Gene Name")
+write_xlsx(dep.info.table, "DEP_results.xlsx")
+
+# Selected proteins table
+
+prot.names.table <- control.bpd.names[clusters.table$`Entry Name`,]
+rownames(prot.names.table) <- clusters.table$`protein name`
+prot.names.table <- prot.names.table %>%
+  arrange(desc(abs(logFC)))
+prot.names.table$`protein name` <- rownames(prot.names.table)
+final.cluster.table <- merge(clusters.table, prot.names.table, by = "protein name")
+final.cluster.table <- final.cluster.table[,-c(5:6,9)]
+final.cluster.table <- final.cluster.table %>%
+  arrange(desc(logFC))
+cluster.1 <- final.cluster.table[final.cluster.table$`cluster number`==1,]
+cluster.2 <- final.cluster.table[final.cluster.table$`cluster number`==2,]
+cluster.3 <- final.cluster.table[final.cluster.table$`cluster number`==3,]
+cluster.4 <- final.cluster.table[final.cluster.table$`cluster number`==4,]
+
+outside.proteins <- c("TFF3_HUMAN", "MESD_HUMAN", "H2B1K_HUMAN", "HDGR2_HUMAN",
+                      "GFPT1_HUMAN")
+outside.protein.genes <- c("TFF3", "MESD", "H2BC12", "HDGFL2", "GFPT1")
+outside.prot.table <- control.bpd.names[outside.proteins,]
+outside.prot.table$protein.names <- rownames(outside.prot.table)
+outside.prot.table$gene <- outside.protein.genes
+
+```
+
+### Table design for box and violin plotting, and further analyses
+
+```{r}
+
+selected.final.proteins <- c(final.cluster.table$`Entry Name`, outside.proteins)
+conditions <- samples$cond_type
+conditions <- factor(conditions, levels = c("NPA Control", "NPA BPD"))
+
+```
+
+### Calculate AUC for all selected proteins
+
+```{r}
+
+roc.data.sel <- protein_log_filter[dep,]
+roc.data.sel <- t(roc.data.sel)
+roc.data.sel <- as.data.frame(roc.data.sel)
+colnames(roc.data.sel) <- id.names$`Entry Name`
+roc.data.sel <- roc.data.sel[,selected.final.proteins]
+samples.roc <- samples
+samples.roc$class <- samples.roc$cond_type
+samples.roc$class <- factor(samples.roc$class, levels=c("NPA Control", "NPA BPD"), 
+                         labels=c("0", "1"))
+roc.data.sel <- roc.data.sel[samples.roc$new_samples,]
+
+auc.df <- data.frame(proteins= colnames(roc.data.sel), AUC=NA)
+for (n in 1:nrow(auc.df)){
+  name <- auc.df$proteins[n]
+  h <- roc(samples.roc$class, roc.data.sel[,name], plot=FALSE, legacy.axes=TRUE, print.auc=TRUE,print.auc.x=.3,print.auc.y=0.53, grid=TRUE)
+  h1 <- h[["auc"]][1]
+  auc.df$AUC[n] <- h1
+}
+
+auc.df <- auc.df %>%
+  arrange(desc(AUC))
+
+glm.fit.panel.sel.5 <- glm(samples.roc$class ~ roc.data.sel[,auc.df$proteins[1]] +
+                           roc.data.sel[,auc.df$proteins[2]] +
+                           roc.data.sel[,auc.df$proteins[3]] +
+                           roc.data.sel[,auc.df$proteins[4]] + 
+                           roc.data.sel[,auc.df$proteins[5]],
+                         family=binomial)
+glm.fit.panel.sel.10 <- glm(samples.roc$class ~ roc.data.sel[,auc.df$proteins[1]] +
+                           roc.data.sel[,auc.df$proteins[2]] +
+                           roc.data.sel[,auc.df$proteins[3]] +
+                           roc.data.sel[,auc.df$proteins[4]] + 
+                           roc.data.sel[,auc.df$proteins[5]] +
+                           roc.data.sel[,auc.df$proteins[6]] +
+                           roc.data.sel[,auc.df$proteins[7]] +
+                           roc.data.sel[,auc.df$proteins[8]] +
+                           roc.data.sel[,auc.df$proteins[9]] +
+                           roc.data.sel[,auc.df$proteins[10]],
+                         family=binomial)
+glm.fit.panel.sel.15 <- glm(samples.roc$class ~ roc.data.sel[,auc.df$proteins[1]] +
+                           roc.data.sel[,auc.df$proteins[2]] +
+                           roc.data.sel[,auc.df$proteins[3]] +
+                           roc.data.sel[,auc.df$proteins[4]] + 
+                           roc.data.sel[,auc.df$proteins[5]] +
+                           roc.data.sel[,auc.df$proteins[6]] +
+                           roc.data.sel[,auc.df$proteins[7]] +
+                           roc.data.sel[,auc.df$proteins[8]] +
+                           roc.data.sel[,auc.df$proteins[9]] +
+                           roc.data.sel[,auc.df$proteins[10]] +
+                           roc.data.sel[,auc.df$proteins[11]] +
+                           roc.data.sel[,auc.df$proteins[12]] +
+                           roc.data.sel[,auc.df$proteins[13]] +
+                           roc.data.sel[,auc.df$proteins[14]] +
+                           roc.data.sel[,auc.df$proteins[15]],
+                         family=binomial)
+glm.fit.panel.sel.20 <- glm(samples.roc$class ~ roc.data.sel[,auc.df$proteins[1]] +
+                           roc.data.sel[,auc.df$proteins[2]] +
+                           roc.data.sel[,auc.df$proteins[3]] +
+                           roc.data.sel[,auc.df$proteins[4]] + 
+                           roc.data.sel[,auc.df$proteins[5]] +
+                           roc.data.sel[,auc.df$proteins[6]] +
+                           roc.data.sel[,auc.df$proteins[7]] +
+                           roc.data.sel[,auc.df$proteins[8]] +
+                           roc.data.sel[,auc.df$proteins[9]] +
+                           roc.data.sel[,auc.df$proteins[10]] +
+                           roc.data.sel[,auc.df$proteins[11]] +
+                           roc.data.sel[,auc.df$proteins[12]] +
+                           roc.data.sel[,auc.df$proteins[13]] +
+                           roc.data.sel[,auc.df$proteins[14]] +
+                           roc.data.sel[,auc.df$proteins[15]] +
+                           roc.data.sel[,auc.df$proteins[16]] +
+                           roc.data.sel[,auc.df$proteins[17]] +
+                           roc.data.sel[,auc.df$proteins[18]] +
+                           roc.data.sel[,auc.df$proteins[19]] +
+                           roc.data.sel[,auc.df$proteins[20]],
+                         family=binomial)
+
+glm.fit.panel.sel.sig <- glm(samples.roc$class ~
+                           roc.data.sel[,auc.df$proteins[1]] +
+                           roc.data.sel[,auc.df$proteins[2]] + 
+                           roc.data.sel[,auc.df$proteins[3]] +
+                           roc.data.sel[,auc.df$proteins[4]] +
+                           roc.data.sel[,auc.df$proteins[5]] +
+                           roc.data.sel[,auc.df$proteins[11]] +
+                           roc.data.sel[,auc.df$proteins[14]],
+                         family=binomial)
+
+glm.fit.panel.sel.sig.top <- glm(samples.roc$class ~
+                           roc.data.sel[,auc.df$proteins[2]] +   
+                           roc.data.sel[,auc.df$proteins[3]] +
+                           roc.data.sel[,auc.df$proteins[4]] +
+                           roc.data.sel[,auc.df$proteins[5]],
+                         family=binomial)
+
+glm.fit.panel.sel.sig.top3<- glm(samples.roc$class ~
+                           roc.data.sel[,auc.df$proteins[2]] +   
+                           roc.data.sel[,auc.df$proteins[4]] +
+                           roc.data.sel[,auc.df$proteins[5]],
+                         family=binomial)
+
+par(pty="s")
+roc(samples.roc$class, glm.fit.panel.sel.5$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.65,print.auc.y=0.23, grid=TRUE,
+    col="#D81B60", lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.10$fitted.values, col="#1E88E5", add=TRUE,
+         print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.33, lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.15$fitted.values, col="#FFC107", add=TRUE,
+         print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.43, lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.20$fitted.values, col="#004D40", add=TRUE,
+         print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.53, lwd=4, ci=TRUE)
+par(pty="m")
+
+par(pty="s")
+roc(samples.roc$class, glm.fit.panel.sel.sig$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.65,print.auc.y=0.53, grid=TRUE,
+    col="#A727BD", lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.sig.top$fitted.values, col="#ADE718",
+         add=TRUE, print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.43, lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.sig.top3$fitted.values, col="#5BD5FA",
+         add=TRUE, print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.33, lwd=4, ci=TRUE)
+par(pty="m")
+
+summary(glm.fit.panel.sel.5)
+summary(glm.fit.panel.sel.10)
+summary(glm.fit.panel.sel.15)
+summary(glm.fit.panel.sel.20)
+summary(glm.fit.panel.sel.sig)
+summary(glm.fit.panel.sel.sig.top)
+summary(glm.fit.panel.sel.sig.top3)
+
+# Get CI values of each selected biomarker, then for all panels
+
+CI.df <- data.frame(proteins= colnames(roc.data.sel[,auc.df$proteins[c(1:5,11,
+                                                                       14)]]),
+                    CI=NA)
+for (n in 1:nrow(CI.df)){
+  name <- auc.df$proteins[n]
+  h <- roc(samples.roc$class, roc.data.sel[,name], plot=FALSE, legacy.axes=TRUE, print.auc=TRUE,print.auc.x=.3,print.auc.y=0.53, grid=TRUE,ci=TRUE)
+  h1 <- paste0(h[["ci"]][1]," - ",h[["ci"]][3])
+  CI.df$CI[n] <- h1
+}
+
+CI.df
+
+write_xlsx(CI.df, "CI_biomarkers.xlsx")
+
+CI.bm.panels <- data.frame(Biomarker.panels= c("Top 7","Top 4", "Top 3"),
+                    CI=NA)
+top7bm <- roc(samples.roc$class, glm.fit.panel.sel.sig$fitted.values,  
+    print.auc=TRUE,legacy.axes=TRUE, grid=TRUE, ci=TRUE)
+top4bm <- roc(samples.roc$class, glm.fit.panel.sel.sig.top$fitted.values, 
+    print.auc=TRUE, ci=TRUE)
+top3bm <- roc(samples.roc$class, glm.fit.panel.sel.sig.top3$fitted.values,
+    print.auc=TRUE, ci=TRUE)
+
+CI.bm.panels$CI[1] <- paste0(top7bm[["ci"]][1]," - ",top7bm[["ci"]][3])
+CI.bm.panels$CI[2] <- paste0(top4bm[["ci"]][1]," - ",top4bm[["ci"]][3])
+CI.bm.panels$CI[3] <- paste0(top3bm[["ci"]][1]," - ",top3bm[["ci"]][3])
+
+write_xlsx(CI.bm.panels, "CI_biomarker_panels.xlsx")
+
+CI.panels <- data.frame(Panels.AUC= c("Top 5","Top 10", "Top 15", "Top 20"),
+                    CI=NA)
+
+top5 <- roc(samples.roc$class, glm.fit.panel.sel.5$fitted.values,
+    print.auc=TRUE, ci=TRUE)
+top10 <- roc(samples.roc$class, glm.fit.panel.sel.10$fitted.values,
+    print.auc=TRUE, ci=TRUE)
+top15 <- roc(samples.roc$class, glm.fit.panel.sel.15$fitted.values,
+    print.auc=TRUE, ci=TRUE)
+top20 <- roc(samples.roc$class, glm.fit.panel.sel.20$fitted.values,
+    print.auc=TRUE, ci=TRUE)
+
+CI.panels$CI[1] <- paste0(top5[["ci"]][1]," - ",top5[["ci"]][3])
+CI.panels$CI[2] <- paste0(top10[["ci"]][1]," - ",top10[["ci"]][3])
+CI.panels$CI[3] <- paste0(top15[["ci"]][1]," - ",top15[["ci"]][3])
+CI.panels$CI[4] <- paste0(top20[["ci"]][1]," - ",top20[["ci"]][3])
+
+write_xlsx(CI.panels, "CI_AUC_panels.xlsx")
+
+```
+
+#### Roc TOP comparisons (tests)
+
+```{r}
+
+top5.roc <- roc(samples.roc$class, glm.fit.panel.sel.5$fitted.values, plot=F,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.53, grid=TRUE,
+    col="red", lwd=4)
+top10.roc <- roc(samples.roc$class, glm.fit.panel.sel.10$fitted.values, plot=F,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.53, grid=TRUE,
+    col="red", lwd=4)
+top15.roc <- roc(samples.roc$class, glm.fit.panel.sel.15$fitted.values, plot=F,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.53, grid=TRUE,
+    col="red", lwd=4)
+top20.roc <- roc(samples.roc$class, glm.fit.panel.sel.20$fitted.values, plot=F,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.53, grid=TRUE,
+    col="red", lwd=4)
+
+roc.test(top5.roc, top10.roc, method="delong")
+roc.test(top5.roc, top15.roc, method="delong")
+roc.test(top5.roc, top20.roc, method="delong")
+roc.test(top10.roc, top15.roc, method="delong")
+roc.test(top10.roc, top20.roc, method="delong")
+roc.test(top15.roc, top20.roc, method="delong")
+
+```
+
+#### Save figures
+
+```{r, eval=FALSE}
+
+svglite::svglite("FIGURAS/ROC_top_5_20.svg")
+par(pty="s")
+roc(samples.roc$class, glm.fit.panel.sel.5$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.65,print.auc.y=0.53, grid=TRUE,
+    col="#D81B60", lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.10$fitted.values, col="#1E88E5", add=TRUE,
+         print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.43, lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.15$fitted.values, col="#FFC107", add=TRUE,
+         print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.33, lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.20$fitted.values, col="#004D40", add=TRUE,
+         print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.23, lwd=4, ci=TRUE)
+par(pty="m")
+dev.off()
+
+svglite::svglite("FIGURAS/ROC_top_3_7.svg")
+par(pty="s")
+roc(samples.roc$class, glm.fit.panel.sel.sig$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.65,print.auc.y=0.53, grid=TRUE,
+    col="#A727BD", lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.sig.top$fitted.values, col="#ADE718",
+         add=TRUE, print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.43, lwd=4, ci=TRUE)
+plot.roc(samples.roc$class, glm.fit.panel.sel.sig.top3$fitted.values, col="#5BD5FA",
+         add=TRUE, print.auc=TRUE,
+         print.auc.x=.65,print.auc.y=0.33, lwd=4, ci=TRUE)
+par(pty="m")
+dev.off()
+
+```
+
+
+### Table with merged information of AUC, FC, p-values and B values:
+
+```{r}
+
+# Decision table building
+
+merged.dec.table <- control.bpd.names[selected.final.proteins,]
+merged.dec.table$proteins <- rownames(merged.dec.table)
+rownames(merged.dec.table) <- merged.dec.table$proteins
+selected.final.genes <- c(final.cluster.table$`protein name`, outside.protein.genes)
+merged.dec.table$genes <- selected.final.genes
+merged.dec.table <- merge(merged.dec.table, auc.df, by="proteins")
+rownames(merged.dec.table) <- merged.dec.table$proteins 
+merged.dec.table <- merged.dec.table[selected.final.proteins,]
+merged.dec.table$genes <- selected.final.genes
+id.names$proteins <- id.names$`Entry Name`
+merged.dec.table <- merge(merged.dec.table, id.names, by="proteins")
+merged.dec.table <- merged.dec.table[,-c(9,11:16)]
+colnames(merged.dec.table)[9] <- "ID"
+merged.dec.table <- merged.dec.table %>%
+  arrange(desc(AUC))
+order <- c(1,7,9,10, 2:6, 8)
+merged.dec.table <- merged.dec.table[,order]
+write_xlsx(merged.dec.table, "selected_final_proteins.xlsx")
+
+```
+
+### Table with annotations and clusters included of each protein
+
+```{r}
+
+annotations <- read.table(file = "./STRING/string_protein_annotations (1).tsv",
+                          header = F, sep= "\t")
+annotations <- annotations[,c(1,3)]
+colnames(annotations) <- c("genes","description")
+annotation.merged.table <- merge(merged.dec.table, annotations, by="genes")
+annotation.merged.table <- annotation.merged.table[,c(3,2,1,5,7:8,10:11)]
+annotation.merged.table <- annotation.merged.table %>%
+  mutate(protein.description= gsub(";.*", "", description),
+         ext.description= gsub("^.*?;", "", description))
+annotation.merged.table <- annotation.merged.table[,c(1:3,10,9,4:7)]
+clusters.string <- final.cluster.table[,c(1,4)]
+colnames(clusters.string) <- c("genes", "cluster.number")
+independence <- c(rep("Independent",10))
+outside.clusters <- data.frame("genes"=outside.protein.genes,
+                               "cluster.number"=independence)
+cluster.info <- rbind(clusters.string, outside.clusters)
+annotation.merged.table <- merge(annotation.merged.table, cluster.info, by="genes")
+annotation.merged.table <- annotation.merged.table[,c(1:3,5,10,4,6:9)]
+annotation.merged.table <- annotation.merged.table[!duplicated(annotation.merged.table$genes),]
+annotation.merged.table <- annotation.merged.table %>%
+  mutate(cluster.summary=case_when(cluster.number=="1" ~ "Protein translation regulation",
+                                   cluster.number=="2" ~ "Epiderm formation",
+                                   cluster.number=="3" ~ "Reactive oxygen species regulation",
+                                   cluster.number=="4" ~ "Secreted proteins",
+                                   cluster.number=="Independent" ~ "Multiple functions")) %>%
+  arrange(desc(AUC))
+annotation.merged.table <- annotation.merged.table[,c(1:5,11,6,7:10)]
+
+write_xlsx(annotation.merged.table, "final_proteins_annotations.xlsx")
+
+```
+
+### Boxplots
+
+```{r}
+selection <- c("KRT2","DPYSL2","H2BC12","SGSH","HMOX1","KHSRP","VNN2")
+boxes.prot <- protein_log_filter[annotation.merged.table$ID[annotation.merged.table$genes %in% selection],]
+rownames(boxes.prot) <- selection
+boxes.prot <- as.data.frame(t(boxes.prot))
+boxes.prot$condition <- conditions
+library(reshape2)
+library(ggsignif)
+library(ggpubr)
+
+df.m <- melt(boxes.prot, id.var = "condition")
+boxplots <- ggplot(data = df.m, aes(x=variable, y=value)) +
+  ylim(7.5,22) +
+  ylab("log2(Raw Intensities)") +
+  xlab("Biomarkers") +
+  theme_bw()+
+  geom_boxplot(aes(fill=condition)) +
+  scale_fill_manual(values = c("#0C7BDC","#FFC20A"), labels=c("Control", "BPD"),
+                    name="Legend")
+boxplots
+ggsave(plot = boxplots, "FIGURAS/Boxplots.svg", height = 7, width = 9)
+  
+```
+
+### Volcano with gene names representation
+
+```{r}
+data.genes <- data
+data.genes$Genes <- gsub(";.*", "", data.genes$Genes)
+data.genes$Protein.Ids <- gsub(";.*", "", data.genes$Protein.Ids)
+volcano <- control.bpd
+volcano <- volcano[,c(1,3)]
+volcano$Protein.Ids <- rownames(control.bpd)
+volcano <- merge(volcano, data.genes, by= "Protein.Ids")
+volcano <- volcano[!duplicated(volcano$Protein.Ids),]
+volcano <- volcano[,c(6,2,3)]
+volcano$diffexpressed <- "NO"
+# if log2Foldchange > 0.6 and pvalue < 0.05, set as "UP" 
+volcano$diffexpressed[volcano$logFC > 0.58 & volcano$P.Value < 0.05] <- "UP"
+# if log2Foldchange < -0.6 and pvalue < 0.05, set as "DOWN"
+volcano$diffexpressed[volcano$logFC < -0.58 & volcano$P.Value < 0.05] <- "DOWN"
+volcano$delabel <- NA
+volcano$delabel[volcano$diffexpressed != "NO"] <- volcano$Genes[volcano$diffexpressed != "NO"]
+library(ggrepel)
+volcano.plot <- ggplot(data=volcano, aes(x=logFC, y=-log10(P.Value), 
+                    col=diffexpressed, label=delabel)) +
+  ylab("-log10(P-value)") +
+  xlab("log2(Fold-Change)")+
+  xlim(-2.5, 2.5) +
+  geom_point() + 
+  theme_bw() +
+  geom_text_repel(size = 2, nudge_x = 0.05, 
+                  nudge_y = 0.05, check_overlap = T, 
+                  show.legend=FALSE, col="black") +
+  scale_color_manual(values=c("#1A85FF","gray54","#D41159"),
+                    name=NULL, labels=c("Downregulated",
+                                        "Non-differential",
+                                        "Upregulated")) +
+  geom_vline(xintercept=c(-0.6, 0.6), col="black", lty=2) +
+  geom_hline(yintercept=-log10(0.05), col="black", lty=2) +
+  annotate(geom = "text", label=paste0("Downregulated: ", length(down.proteins)),
+           col= "#1A85FF", x=-1.8, y=8, fontface= "bold") +
+  annotate(geom = "text", label=paste0("Upregulated: ", length(up.proteins)),
+           col= "#D41159", x=1.9, y=8, fontface= "bold")
+
+volcano.plot
+ggsave(plot= volcano.plot, "Figuras/Volcano_plot.svg",height = 6,width = 8)
+```
+
+
+##### Heatmap
+
+```{r}
+
+key.prots <- read_xlsx("DEP_results.xlsx")
+heat.prots <- protein_log_filter[key.prots$`Protein ID`,]
+rownames(heat.prots) <- key.prots$`Gene Name`
+
+# Heatmap 
+
+colfunc <- colorRampPalette(colors = c("royalblue4","ivory", "red4"))
+
+heatmap.2(as.matrix(heat.prots), 
+          col = colfunc(256),
+          scale = "row",
+          trace = "none",
+          dendrogram="both",
+          Colv = TRUE,
+          key = TRUE,
+          keysize = 1.5, 
+          key.title = NA,
+          ColSideColors = c(rep("#FFC20A",57),rep("#0C7BDC",74)),
+          labRow = rownames(heat.prots),
+          cexRow = 0.4,
+          srtRow = 0.5,
+          key.xlab = "Z-score",
+          key.ylab = "",
+          density.info = "none",
+          cex.main = 1,
+          offsetRow = -0.5
+          )
+par(xpd=TRUE)
+legend("topright", legend = c("Control", "BPD"), fill = c("#0C7BDC","#FFC20A"))
+```
+
+##### Save:
+
+```{r}
+
+svglite::svglite("FIGURAS/heatmap_top.svg")
+heatmap.2(as.matrix(heat.prots), 
+          col = colfunc(256),
+          scale = "row",
+          trace = "none",
+          dendrogram="both",
+          Colv = TRUE,
+          key = TRUE,
+          keysize = 1.5, 
+          key.title = NA,
+          ColSideColors = c(rep("#FFC20A",57),rep("#0C7BDC",74)),
+          labRow = rownames(heat.prots),
+          cexRow = 0.4,
+          srtRow = 0.5,
+          key.xlab = "Z-score",
+          key.ylab = "",
+          density.info = "none",
+          cex.main = 1,
+          offsetRow = -0.5
+          )
+par(xpd=TRUE)
+legend("topright", legend = c("Control", "BPD"), fill = c("#0C7BDC","#FFC20A"))
+dev.off()
+
+```
+
+
+# Study Population variable table
+
+```{r}
+
+proteins <- protein_log_filter[dep,]
+proteins <- t(proteins)
+proteins <- as.data.frame(proteins)
+colnames(proteins) <- id.names$`Entry Name`
+proteins <- proteins[,auc.df$proteins]
+colnames(proteins) <- annotation.merged.table$genes
+
+# Turn row names into a column for the merge
+
+protein.samples <- rownames(proteins)
+proteins$new_samples <- protein.samples
+
+samples.and.protein <- merge(samples.roc, proteins, by="new_samples")
+variables <- read_xlsx("./pacientes.xlsx")
+variables <- variables[,c(3,5:6,8:9,11,54,70)]
+variables <- merge(samples.and.protein, variables, by=c("patient", "cod_centro"))
+variables <- variables[,-c(12:42)]
+variables$`Fecha de Nacimiento` <- as.Date(variables$`Fecha de Nacimiento`, "%d/%m/%Y")
+variables$`Fecha de alta` <- as.Date(variables$`Fecha de alta`, "%d/%m/%Y")
+variables <- variables %>%
+  mutate(Condition=case_when(jensen_condition=="bpd" ~ "BPD",
+                             jensen_condition=="control" ~ "Control",
+                             jensen_condition=="fallecido" ~ "BPD"),
+         BPD.Grade=case_when(jensen=="grado 1" ~ "Grade 1",
+                             jensen=="grado 2" ~ "Grade 2",
+                             jensen=="grado 3" ~ "Grade 3",
+                             jensen=="control" ~ "Control",
+                             jensen=="fallecido" ~ "Deceased"),
+         Days.hospitalization=difftime(`Fecha de alta`,`Fecha de Nacimiento`, 
+                                       units = "days"),
+         New.Sex=case_when(Sexo=="Mujer" ~ "Yes",
+                           Sexo=="Varón" ~ "No"))  %>%
+  mutate_all(function(x) gsub("Varón","Male",x)) %>%
+  mutate_all(function(x) gsub("Mujer","Female",x))
+
+variables <- variables %>%
+  mutate_at(c("EG al nacimiento (semanas)", "Peso al nacimiento", 
+              "Days.hospitalization", "Días 1 sem de VM"), as.numeric)
+variables$Condition <- factor(variables$Condition, levels=c("Control", "BPD"))
+variables$BPD.Grade <- factor(variables$BPD.Grade, levels=c("Control", "Grade 1",
+                                                            "Grade 2", "Grade 3",
+                                                            "Deceased"))
+variables$New.Sex <- factor(variables$New.Sex, levels = c("Yes", "No"))
+library(openxlsx)
+wide.modality <- read.xlsx("wide_060324_mod.xlsx")
+wide.modality <- wide.modality %>%
+  mutate(Modality=case_when(Modalidad=="AC/VG" | Modalidad=="PC" | 
+                              Modalidad=="PSV" | Modalidad=="PSV+VG" |
+                              Modalidad=="SIMV+VG" | Modalidad=="VAFO" |
+                              Modalidad=="VCRP" | Modalidad=="VM A/C" |
+                              Modalidad=="VM A/C CON VG" | 
+                              Modalidad=="VMC" | Modalidad=="VMC A/C" ~ "IMV",
+                            Modalidad=="VNI" | Modalidad=="DUOPAP" |
+                              Modalidad=="IPPVn" ~ "NIV",
+                            Modalidad=="CPAP" | Modalidad=="CPAPn" ~ "nCPAP",
+                            Modalidad=="Alto flujo" | Modalidad=="GNAF" |
+                              Modalidad=="OAF" | Modalidad=="HFNC" ~ "HFNC",
+                            Modalidad=="GNBF" ~ "LFNC",
+                            Modalidad=="No O2" | 
+                              Modalidad=="Sin soporte" ~ "No respiratory support"
+                            ))
+wide.modality$Modality <- factor(wide.modality$Modality, levels = c("IMV", "NIV",
+                                                                    "nCPAP",
+                                                                    "HFNC","LFNC",
+                                                                    "No respiratory support"))
+new.variables <- merge(variables, wide.modality, by=c("patient","cod_centro"))
+hospitals <- new.variables[,c(18,4)]
+
+new.variables <- new.variables[,c(21,14:16,18,23,19:20)]
+
+# Hospitals
+
+hospitals %>%
+  tbl_summary(
+    by= Condition,
+    statistic = list(hospital_abrev ~ "{n} ({p}%)"),   
+    type   = list(hospital_abrev ~ "categorical"),
+    label = list(hospital_abrev ~ "Hospital"),
+    sort = list(everything() ~ "frequency")) %>%
+  modify_header(label ~ "**Condition**") %>%
+  modify_caption("**Table. Patient Hospital of Origin**") %>%
+  add_overall() %>%
+  italicize_levels()
+
+# Hospital save:
+
+hospitals %>%
+  tbl_summary(
+    by= Condition,
+    statistic = list(hospital_abrev ~ "{n} ({p}%)"),   
+    type   = list(hospital_abrev ~ "categorical"),
+    label = list(hospital_abrev ~ "Hospital"),
+    sort = list(everything() ~ "frequency")) %>%
+  modify_header(label ~ "**Condition**") %>%
+  modify_caption("**Table. Patient Hospital of Origin**") %>%
+  add_overall() %>%
+  italicize_levels() %>%
+  as_gt() %>%
+  gt::gtsave(filename = "pacientes_hospitales.docx")
+
+# View table:
+
+new.variables %>%
+  tbl_summary(
+    by= Condition,
+    statistic = list(all_continuous() ~ "{mean} ({sd})",        
+                     BPD.Grade ~ "{n} ({p}%)",
+                     New.Sex ~ "{n} ({p}%)"),   
+    digits = all_continuous() ~ 1,                            
+    type   = list(all_categorical() ~ "categorical",
+                  `EG al nacimiento (semanas)` ~ "continuous",
+                  `Días 1 sem de VM` ~ "continuous",
+                  Modality ~ "categorical"),
+    label = list(New.Sex ~ "Sex, Female",
+                 `EG al nacimiento (semanas)` ~ "GA (weeks)",
+                 `Peso al nacimiento` ~ "Weight",
+                 `Días 1 sem de VM` ~ "Days of VM at 1 week",
+                 BPD.Grade ~ "BPD grade",
+                 Days.hospitalization ~ "Days of hospitalization",
+                 Modality ~ "Respiratory modality al 1 week")) %>%
+  modify_header(label ~ "**Condition**") %>%
+  modify_caption("**Table 1. Patient Clinical Characteristics**") %>%
+  add_p() %>%
+  bold_p() %>%
+  add_overall() %>%
+  italicize_levels() %>%
+  as_gt() %>%
+  gt::tab_source_note(gt::md("*IVM: Invasive Mechanical Ventilation; NIV: Non-Invasive Ventilation; nCPAP: nasal CPAP; HFNC: High Flow Nasal Cannula ; LFNG: Low Flow Nasal Cannula*"))
+
+# Save table as .docx
+
+new.variables %>%
+  tbl_summary(
+    by= Condition,
+    statistic = list(all_continuous() ~ "{mean} ({sd})",        
+                     BPD.Grade ~ "{n} ({p}%)",
+                     New.Sex ~ "{n} ({p}%)"),   
+    digits = all_continuous() ~ 1,                            
+    type   = list(all_categorical() ~ "categorical",
+                  `EG al nacimiento (semanas)` ~ "continuous",
+                  `Días 1 sem de VM` ~ "continuous",
+                  Modality ~ "categorical"),
+    label = list(New.Sex ~ "Sex, Female",
+                 `EG al nacimiento (semanas)` ~ "GA (weeks)",
+                 `Peso al nacimiento` ~ "Weight",
+                 `Días 1 sem de VM` ~ "Days of VM at 1 week",
+                 BPD.Grade ~ "BPD grade",
+                 Days.hospitalization ~ "Days of hospitalization",
+                 Modality ~ "Respiratory modality al 1 week")) %>%
+  modify_header(label ~ "**Condition**") %>%
+  modify_caption("**Table 1. Patient Clinical Characteristics**") %>%
+  add_p() %>%
+  bold_p() %>%
+  add_overall() %>%
+  italicize_levels() %>%
+  as_gt() %>%
+  gt::tab_source_note(gt::md("*IVM: Invasive Mechanical Ventilation; NIV: Non-Invasive Ventilation; nCPAP: nasal CPAP; HFNC: High Flow Nasal Cannula ; LFNG: Low Flow Nasal Cannula*")) %>%
+  gt::gtsave(filename = "Table_1_def_decbpd_control.docx")
+
+
+
+```
