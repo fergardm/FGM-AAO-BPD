@@ -12,4 +12,4 @@ You can find a summarized workflow of our study in the image below.
 
 Thanks!
 
-[workflow git.pdf](https://github.com/user-attachments/files/17145541/workflow.git.pdf)
+![workflow git](https://github.com/user-attachments/assets/45e09624-75d9-42e5-88f2-b8ff54952966)
