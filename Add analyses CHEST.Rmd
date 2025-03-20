@@ -1,0 +1,1128 @@
+---
+title: "PARADYS Proteomics analysis"
+author: "Fernando Garrido Muñoz"
+date: "`r format(Sys.time(), '%a %d, %b, %Y')`"
+output: html_document
+---
+
+# Load required packages
+
+```{r, warning=FALSE, results='hide', message=FALSE}
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+library(tidyverse)
+library(factoextra)
+library(´FactoMineR)
+library(stringr)
+library(readxl)
+library(writexl)
+library(VIM)
+library(promor)
+library(pcaMethods)
+library(ggplot2)
+library(gplots)
+library(mixOmics)
+library(VennDetail)
+library(kableExtra)
+library(gtsummary)
+library(NormalyzerDE)
+library(limma)
+library(pROC)
+
+
+```
+
+# Load required data
+
+## Load proteomic data
+
+```{r, results='hide'}
+
+proteins <-read.table(file = "protein_log_filter.txt", sep = "\t", header = T,
+                      row.names = 1, check.names = F)
+
+```
+
+## Sample table generation
+
+```{r}
+
+samples <- read_excel("inventario_post_procesamiento.xlsx", sheet = "SamplesConditions")
+samples <- as.data.frame(samples)
+samples$jensen_condition <- as.factor(samples$jensen_condition) # turn this data to factor
+# class(samples$jensen_condition) this is used to check if it has correctly changed to factor
+samples$type <- as.factor(samples$type)
+# order_samples <- samples$jensen_condition
+rownames(samples) <- samples$new_sample
+
+# Add a more specific column with condition + type:
+
+samples <- samples %>% mutate(cond_type=case_when(jensen_condition=="control" & type=="NF" ~ "NPA Control",
+                                       jensen_condition=="control" & type=="TQ" ~ "TA Control",
+                                       jensen_condition=="bpd" & type=="NF" ~ "NPA BPD",
+                                       jensen_condition=="bpd" & type=="TQ" ~ "TA BPD",
+                                       jensen_condition=="fallecido" & type=="NF" ~ "NPA Deceased",
+                                       jensen_condition=="fallecido" & type=="TQ" ~ "TA Deceased"),
+                              cod_centro=case_when(hospital_abrev=="Cádiz" ~ "01",
+                                                   hospital_abrev=="Basurto" ~ "02",
+                                                   hospital_abrev=="Vigo" ~ "03",
+                                                   hospital_abrev=="Girona" ~ "04",
+                                                   hospital_abrev=="Clinic" ~ "05",
+                                                   hospital_abrev=="HGM" ~ "06",
+                                                   hospital_abrev=="León" ~ "07"))
+
+samples$cond_type <- as.factor(samples$cond_type)
+samples$hospital_abrev <- as.factor(samples$hospital_abrev)
+
+# Merge patient database:
+
+wide <- read_xlsx("New DDBB/pacientes.xlsx")
+colnames(wide)[c(3,5)] <- c("patient","cod_centro")
+colnames(wide) <- make.names(colnames(wide))
+wide <- wide[,c(3:9,11:12,14,18:19,21,25:26,28,33,54,61,70)]
+wide$Fecha.de.Nacimiento <- as.Date(wide$Fecha.de.Nacimiento, "%d/%m/%Y")
+wide$Fecha.de.alta <- as.Date(wide$Fecha.de.alta, "%d/%m/%Y")
+w.modality <- read_xlsx("New DDBB/wide_060324_mod.xlsx")
+colnames(w.modality)[c(1,2)] <- c("patient","cod_centro")
+wide <- merge(wide, w.modality, by= c("patient","cod_centro"))
+wide <- wide %>%
+  mutate(SGA= case_when(is.na(EG.al.nacimiento..semanas.) |
+                                is.na(Peso.al.nacimiento) ~ NA,
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==22 &
+                                Peso.al.nacimiento < 368 ~ "YES",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==23 &
+                                Peso.al.nacimiento < 382 ~ "YES",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==24 &
+                                Peso.al.nacimiento < 402 ~ "YES",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==25 &
+                                Peso.al.nacimiento < 428 ~ "YES",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==26 &
+                                Peso.al.nacimiento < 464 ~ "YES",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==27 &
+                                Peso.al.nacimiento < 516 ~ "YES",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==28 &
+                                Peso.al.nacimiento < 596 ~ "YES",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==29 &
+                                Peso.al.nacimiento < 712 ~ "YES",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==22 &
+                                Peso.al.nacimiento >= 368 ~ "NO",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==23 &
+                                Peso.al.nacimiento >= 382 ~ "NO",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==24 &
+                                Peso.al.nacimiento >= 402 ~ "NO",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==25 &
+                                Peso.al.nacimiento >= 428 ~ "NO",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==26 &
+                                Peso.al.nacimiento >= 464 ~ "NO",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==27 &
+                                Peso.al.nacimiento >= 516 ~ "NO",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==28 &
+                                Peso.al.nacimiento >= 596 ~ "NO",
+                              Sexo=="Mujer" & EG.al.nacimiento..semanas.==29 &
+                                Peso.al.nacimiento >= 712 ~ "NO",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==22 &
+                                Peso.al.nacimiento < 395 ~ "YES",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==23 &
+                                Peso.al.nacimiento < 410 ~ "YES",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==24 &
+                                Peso.al.nacimiento < 431 ~ "YES",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==25 &
+                                Peso.al.nacimiento < 460 ~ "YES",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==26 &
+                                Peso.al.nacimiento < 500 ~ "YES",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==27 &
+                                Peso.al.nacimiento < 553 ~ "YES",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==28 &
+                                Peso.al.nacimiento < 627 ~ "YES",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==29 &
+                                Peso.al.nacimiento < 728 ~ "YES",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==22 &
+                                Peso.al.nacimiento >= 395 ~ "NO",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==23 &
+                                Peso.al.nacimiento >= 410 ~ "NO",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==24 &
+                                Peso.al.nacimiento >= 431 ~ "NO",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==25 &
+                                Peso.al.nacimiento >= 460 ~ "NO",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==26 &
+                                Peso.al.nacimiento >= 500 ~ "NO",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==27 &
+                                Peso.al.nacimiento >= 553 ~ "NO",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==28 &
+                                Peso.al.nacimiento >= 637 ~ "NO",
+                              Sexo=="Varón" & EG.al.nacimiento..semanas.==29 &
+                                Peso.al.nacimiento >= 728 ~ "NO",
+                              EG.al.nacimiento..semanas.>29 ~ "NO"),
+         Modality=case_when(Modalidad=="AC/VG" | Modalidad=="PC" | 
+                              Modalidad=="PSV" | Modalidad=="PSV+VG" |
+                              Modalidad=="SIMV+VG" | Modalidad=="VAFO" |
+                              Modalidad=="VCRP" | Modalidad=="VM A/C" |
+                              Modalidad=="VM A/C CON VG" | 
+                              Modalidad=="VMC" | Modalidad=="VMC A/C" ~ "IMV",
+                              Modalidad=="VNI" | Modalidad=="DUOPAP" |
+                              Modalidad=="IPPVn" ~ "NIV",
+                              Modalidad=="CPAP" | Modalidad=="CPAPn" ~ "nCPAP",
+                              Modalidad=="Alto flujo" | Modalidad=="GNAF" |
+                              Modalidad=="OAF" | Modalidad=="HFNC" ~ "HFNC",
+                              Modalidad=="GNBF" ~ "LFNC",
+                              Modalidad=="No O2" | 
+                              Modalidad=="Sin soporte" ~ "No respiratory support"
+                            ),
+         Days.hospitalization=difftime(Fecha.de.alta,Fecha.de.Nacimiento, 
+                                       units = "days"),
+         New.Sex=case_when(Sexo=="Mujer" ~ "Yes",
+                           Sexo=="Varón" ~ "No"))  %>%
+  mutate_all(function(x) gsub("Varón","Male",x)) %>%
+  mutate_all(function(x) gsub("Mujer","Female",x))
+
+wide <- wide %>%
+  mutate_at(c("EG.al.nacimiento..semanas.", "Peso.al.nacimiento", 
+              "Days.hospitalization", "Días.1.sem.de.VM"), as.numeric)
+wide$New.Sex <- factor(wide$New.Sex, levels = c("Yes", "No"))
+wide$Modality <- factor(wide$Modality, levels = c("IMV", "NIV","nCPAP",
+                                                  "HFNC","LFNC",
+                                                  "No respiratory support"))
+
+sample.table <- merge(samples, wide, by=c("patient", "cod_centro"))
+
+sample.table <- sample.table %>%
+  mutate(BPD.Grade=case_when(jensen=="grado 1" ~ "Grade 1",
+                             jensen=="grado 2" ~ "Grade 2",
+                             jensen=="grado 3" ~ "Grade 3",
+                             jensen=="control" ~ "Control",
+                             jensen=="fallecido" ~ "Deceased"),
+         Condition=case_when(jensen_condition=="bpd" ~ "BPD",
+                             jensen_condition=="control" ~ "Control",
+                             jensen_condition=="fallecido" ~ "Deceased")) %>%
+  mutate_all(function(x) gsub("SÍ","YES",x)) %>%
+  mutate_all(function(x) gsub("SI","YES",x)) %>%
+  mutate_all(function(x) gsub("Árabe","Arabic",x)) %>%
+  mutate_all(function(x) gsub("Caucásica","Caucasian",x)) %>%
+  mutate_all(function(x) gsub("Indoamericano","Indoamerican",x)) %>%
+  mutate_all(function(x) gsub("Asiático","Asian",x)) %>%
+  mutate_all(function(x) gsub("Negra","Black",x)) %>%
+  mutate_all(function(x) gsub("Cesárea","Caesarean",x)) %>%
+  mutate_all(function(x) gsub("COMPLETA","Complete",x)) %>%
+  mutate_all(function(x) gsub("PARCIAL","Complete",x)) %>%
+  mutate_all(function(x) gsub("Varón","Male",x)) %>%
+  mutate_all(function(x) gsub("Mujer","Female",x))
+sample.table$Condition <- factor(sample.table$Condition, levels=c("Control", "BPD",
+                                                                  "Deceased"))
+sample.table$BPD.Grade <- factor(sample.table$BPD.Grade, levels=c("Control", "Grade 1",
+                                                  "Grade 2", "Grade 3",
+                                                  "Deceased"))
+
+sample.table <- sample.table[,c(3,1,10,5,2,11,27,31,8:9,34,33,13,32,14:15,29,16:26,30)]
+new.names <- c("Proteo samples","Patient num","Center",
+               "Center code","Center p code","Birthdate",
+               "Discharge date","Days of hospitalization",
+               "Sample type","Condition type","Condition",
+               "BPD grade","Sex","Binary Sex",
+               "GA (weeks)", "Weight","SGA", "Race","CRIB-II",
+               "Type of birth","Maternal Chorioamnionitis",
+               "Prenatal corticosteroids",
+               "Surfactant","Num Dose Surfactant",
+               "Surf adm modality","Sepsis",
+               "Days of VM at 1 week",
+               "Pneumotorax",
+               "Respiratory modality at 1 week") 
+colnames(sample.table) <- new.names
+write_xlsx(sample.table,"master_sample_table.xlsx")
+
+colnames(sample.table) <- make.names(colnames(sample.table))
+
+sample.table <- sample.table %>%
+  mutate(GA.groups= case_when(GA..weeks.<27 ~ "23_26_GA",
+                              GA..weeks. >=27 ~ "27_29_GA")) %>%
+  mutate(limma_GA= case_when(GA.groups=="23_26_GA" ~ "0",
+                             GA.groups=="27_29_GA" ~ "1")) %>%
+  mutate_at(c("GA.groups","limma_GA"), as.factor)
+
+summary(c(sample.table$GA.groups,sample.table$limma_GA))
+# 53 23-26 GA vs. 86 27-29-GA
+
+sample.table.npa <- sample.table[sample.table$Sample.type=="NF",]
+sample.table.npa.nd <- sample.table.npa[sample.table.npa$Condition!="Deceased",]
+
+write_xlsx(sample.table.npa,"master_sample_table_npa.xlsx")
+write_xlsx(sample.table.npa.nd,"master_sample_table_npa_nd.xlsx")
+
+```
+
+## Filtered proteomic data for non-deceased NPA study
+
+```{r}
+
+proteins.npa.nd <- proteins[,sample.table.npa.nd$Proteo.samples]
+
+```
+
+
+# Additional analyses
+
+## Exploratory analysis GA (paused)
+
+### PCA 
+
+#### Required data
+
+```{r}
+
+protein_matrix <- t(proteins.npa.nd)
+dim(protein_matrix)
+protein_matrix <- scale(protein_matrix, center = FALSE, scale = TRUE)
+GA <- factor(sample.table.npa.nd$GA.groups, levels=c("23_26_GA", "27_29_GA"))
+summary(GA)
+
+```
+
+#### Regular PCA
+
+```{r}
+
+set.seed(222)
+
+pca <- pca(protein_matrix,ncomp = 2, center = TRUE, scale = TRUE,
+           max.iter = 100)
+
+plotIndiv(pca, comp = c(1, 2), ind.names = F, 
+          group = GA,  
+          legend = TRUE, title = 'PCA comp 1 - 2')
+
+svglite::svglite("Figures/PCA GA/PCA_GA.svg")
+plotIndiv(pca, comp = c(1, 2), ind.names = F, 
+          group = GA,
+          ellipse = T,
+          ellipse.level = 0.95,
+          legend = TRUE, title = 'PCA comp 1 - 2',
+          col.per.group =  c("#FFC20A", "#0C7BDC"))
+dev.off()
+
+pdf("Figures/PCA GA/PCA_GA.pdf", height = 6, width = 7)
+plotIndiv(pca, comp = c(1, 2), ind.names = F, 
+          group = GA,
+          ellipse = T,
+          ellipse.level = 0.95,
+          legend = TRUE, title = 'PCA comp 1 - 2',
+          col.per.group =  c("#FFC20A", "#0C7BDC"))
+dev.off()
+```
+
+### PLS-DA
+
+#### Number of components for PLS-DA
+
+```{r}
+
+plsda.perf <- plsda(protein_matrix, GA, ncomp = 10)
+perf.plsda <- mixOmics::perf(plsda.perf, validation = 'Mfold', folds = 5,
+                             progressBar = FALSE, nrepeat = 100)
+svglite::svglite("FIGURAS 30 jul/NCOMP_PLSDA.svg")
+plot(perf.plsda, overlay = 'measure', sd=TRUE)
+dev.off()
+perf.plsda$choice.ncomp
+
+```
+
+#### Best PLS-DA
+
+```{r}
+
+plsda <- plsda(protein_matrix, conditions, ncomp = 2) # Restrict to 2 components 
+plotVar(plsda, comp = c(1,2), cex = 2) 
+
+```
+
+#### Plot PLS-DA
+
+```{r}
+
+# ellipse= FALSE , if you want to turn on the ellipses, just enter ellipse=TRUE
+
+plotIndiv(plsda , comp = c(1,2),
+          group = conditions, ind.names = FALSE, 
+          ellipse = F, legend = TRUE, title = 'PLSDA comp 1 - 2')
+
+svglite::svglite("FIGURAS 9 jul/PLSDA.svg")
+plotIndiv(plsda , comp = c(1,2),
+          group = conditions, ind.names = FALSE, 
+          ellipse = F, legend = TRUE, title = 'PLSDA comp 1 - 2',
+          col.per.group =  c("#FFC20A", "#0C7BDC"))
+dev.off()
+
+```
+
+### sPLS-DA
+
+```{r}
+
+protein.splsda <- splsda(protein_matrix, conditions, ncomp = 10)
+# set ncomp to 10 for performance assessment later
+
+```
+
+#### Plot
+
+```{r, eval=FALSE}
+
+plotIndiv(protein.splsda , comp = 1:2, 
+          group = conditions, ind.names = FALSE, 
+          ellipse = TRUE, 
+          legend = TRUE, title = '(a) PLSDA with confidence ellipses')
+
+background = background.predict(protein.splsda, comp.predicted=2, dist = "max.dist")
+
+plotIndiv(protein.splsda, comp = 1:2,
+          group = conditions, ind.names = FALSE, 
+          background = background,
+          legend = TRUE, title = " (b) PLSDA with prediction background")
+
+
+```
+
+#### Tuning sPLS-DA
+
+```{r}
+set.seed(222)
+# Tuning
+perf.splsda.protein <- perf(protein.splsda, validation = "Mfold", 
+                          folds = 5, nrepeat = 100, # Cross Validation
+                          progressBar = FALSE, auc = TRUE)
+
+plot(perf.splsda.protein, col = color.mixo(5:7), sd = TRUE,
+     legend.position = "horizontal")
+svglite::svglite("FIGURAS 30 jul/sPLSDA_ncomp.svg")
+plot(perf.splsda.protein, col = color.mixo(5:7), sd = TRUE,
+     legend.position = "horizontal")
+dev.off()
+
+
+perf.splsda.protein$choice.ncomp # Optimal number of components
+
+```
+
+#### Selecting the number of variables
+
+```{r}
+set.seed(222)
+
+list.keepX <- c(1:10,  seq(20, 300, 10))
+
+
+tune.splsda.protein <- tune.splsda(protein_matrix, conditions, ncomp = 2, 
+                                 validation = 'Mfold',
+                                 folds = 5, nrepeat = 100, 
+                                 dist = 'mahalanobis.dist',
+                                 measure = "BER", 
+                                 test.keepX = list.keepX,
+                                 cpus = 4,
+                                 progressBar = FALSE) 
+
+plot(tune.splsda.protein, col = color.jet(2)) 
+svglite::svglite("FIGURAS 30 jul/tuned_sPLSDA.svg")
+plot(tune.splsda.protein, col = color.jet(2)) 
+dev.off()
+tune.splsda.protein$choice.ncomp$ncomp # Optimar number of components
+tune.splsda.protein$choice.keepX # Optimal Variables for each component
+optimal.ncomp <- tune.splsda.protein$choice.ncomp$ncomp
+optimal.keepX <- tune.splsda.protein$choice.keepX[1:optimal.ncomp]
+
+
+```
+
+#### Final sPLS-DA
+
+```{r}
+set.seed(222)
+
+final.splsda <- splsda(protein_matrix, conditions, 
+                       ncomp = 2,
+                       keepX = optimal.keepX) 
+
+```
+
+##### Individual Plots
+
+```{r, warning=FALSE}
+
+plotIndiv(final.splsda, comp = c(1,2), 
+          group = conditions, ind.names = FALSE, 
+          ellipse = FALSE, legend = TRUE, 
+          title = ' (a) sPLS-DA on proteins, comp 1 & 2')
+
+background = background.predict(final.splsda, comp.predicted=2, dist = "mahalanobis.dist")
+
+plotIndiv(final.splsda, comp = 1:2,
+          group = conditions, ind.names = FALSE, 
+          background = background,
+          legend = TRUE, title = " (b) sPLSDA with prediction background")
+
+svglite::svglite("FIGURAS 30 jul/sPLSDA.svg")
+plotIndiv(final.splsda, comp = 1:2,
+          group = conditions, ind.names = FALSE, 
+          background = background,
+          legend = TRUE, title = "sPLSDA with prediction background",
+          col.per.group =  c("#FFC20A", "#0C7BDC"))
+dev.off()
+
+```
+
+### Prediction and ROC curves
+
+```{r}
+set.seed(222)
+
+train <- sample(1:nrow(protein_matrix), 50) 
+test <- setdiff(1:nrow(protein_matrix), train) 
+
+# Create Training and Test sets:
+
+X.train <- protein_matrix[train, ]
+X.test <- protein_matrix[test,]
+Y.train <- conditions[train]
+Y.test <- conditions[test]
+
+# Train model
+
+train.splsda.protein <- splsda(X.train, Y.train, ncomp = 3, keepX = optimal.keepX) 
+
+# Use model in Test
+
+predict.splsda.protein <- predict(train.splsda.protein, X.test, 
+                                dist = "mahalanobis.dist")
+
+# Prediction Accuracy Comp 1:
+
+predict.comp1 <- predict.splsda.protein$class$mahalanobis.dist[,1]
+table(factor(predict.comp1, levels = levels(conditions)), Y.test)
+
+# Prediction Accuracy Comps 1 & 2:
+
+predict.comp2 <- predict.splsda.protein$class$mahalanobis.dist[,2]
+table(factor(predict.comp2, levels = levels(conditions)), Y.test)
+
+
+```
+
+#### Plot ROC curve
+
+```{r}
+
+svglite::svglite("FIGURAS 30 jul/ROC_1_comp.svg")
+auc.splsda = auroc(final.splsda, roc.comp = 1, print = TRUE) # Comp 1
+dev.off()
+svglite::svglite("FIGURAS 30 jul/ROC_2_comp.svg")
+auc.splsda2 = auroc(final.splsda, roc.comp = 2, print = TRUE) # Comp 2
+dev.off()
+
+```
+
+#### CI ROC curve
+
+```{r}
+
+pred.final.splsda <- predict(final.splsda, protein_matrix, 
+                                dist = "mahalanobis.dist")
+DiscriminantScoresTable.dim1 <- cbind(as.data.frame(conditions) , as.data.frame(pred.final.splsda$predict[,,"dim1"])) #the number in dimensions depends on the number of components included in your model 
+DiscriminantScoresTable.dim2 <- cbind(as.data.frame(conditions) , as.data.frame(pred.final.splsda$predict[,,"dim2"])) #the number in dimensions depends on the number of components included in your model 
+
+
+```
+
+```{r}
+library(pROC)
+
+ROC.dim1 <- roc(DiscriminantScoresTable.dim1$conditions, 
+                DiscriminantScoresTable.dim1$`NPA BPD`) 
+
+ROC.dim1$auc # AUC
+
+ci.auc(ROC.dim1$auc) # 95% CI
+
+ROC.dim2 <- roc(DiscriminantScoresTable.dim2$conditions, 
+                DiscriminantScoresTable.dim2$`NPA BPD`) 
+
+ROC.dim2$auc # AUC
+
+ci.auc(ROC.dim2$auc) # 95% CI
+
+
+```
+
+
+## Protein Differential Expression Analysis
+
+Using limma
+
+Contrasts to perform: 
+
++ 23-26 GA vs 27-29 GA
+
+### Prepare our data
+
+```{r}
+
+experimental.design <- model.matrix(~ -1+factor(sample.table.npa.nd$limma_GA)) 
+colnames(experimental.design) <- c("EP", "VP")
+linear.fit <- lmFit(proteins.npa.nd, experimental.design)
+contrast.matrix <- makeContrasts(VP-EP,
+                                 levels=c("EP","VP"))
+
+```
+
+### P-values and Fold-Change estimation using *contrast.fit* and *eBayes*
+
+```{r}
+
+contrast.linear.fit <- contrasts.fit(linear.fit, contrast.matrix)
+contrast.results <- eBayes(contrast.linear.fit)
+
+```
+
+### Contrasts
+
+#### 23-26 GA vs 27-29 GA
+
+```{r}
+
+ep.vp <- topTable(contrast.results, number=nrow(protein_log_filter),
+                           coef=1,sort.by="logFC")
+head(ep.vp)
+
+log.fold.change <- ep.vp$logFC
+p.value <- ep.vp$P.Value
+q.value <- ep.vp$adj.P.Val
+protein.ids <- rownames(ep.vp)
+names(log.fold.change) <- protein.ids
+names(p.value) <- protein.ids
+
+dep <- protein.ids[abs(log.fold.change) > 0.58 & p.value < 0.05]
+up.proteins <- protein.ids[log.fold.change > 0.58 & p.value < 0.05]
+down.proteins <- protein.ids[log.fold.change < -0.58 & p.value < 0.05]
+
+length(up.proteins)
+length(down.proteins)
+
+```
+
+##### Save results
+
+```{r, eval=FALSE}
+
+write.table(dep, file= "DEP GA/dep.txt", sep = "\t", row.names = F, col.names = F)
+write.table(up.proteins, file= "DEP GA/up_dep.txt", sep = "\t",row.names = F, col.names = F)
+write.table(down.proteins, file= "DEP GA/down_dep.txt", sep = "\t",row.names = F, col.names = F)
+
+```
+
+##### Volcano Plot
+
+```{r}
+data <- read_excel("NPA_OPT_250424.xlsx")
+data <- as.data.frame(data)
+data <- data[!duplicated(data$Protein.Ids), ]
+data <- data[!is.na(data$Protein.Ids),]
+data.genes <- data
+data.genes$Genes <- gsub(";.*", "", data.genes$Genes)
+data.genes$Protein.Ids <- gsub(";.*", "", data.genes$Protein.Ids)
+volcano <- ep.vp
+volcano <- volcano[,c(1,3)]
+volcano$Protein.Ids <- rownames(ep.vp)
+volcano <- merge(volcano, data.genes, by= "Protein.Ids")
+volcano <- volcano[!duplicated(volcano$Protein.Ids),]
+volcano <- volcano[,c(6,2,3)]
+volcano$diffexpressed <- "NO"
+# if log2Foldchange > 0.6 and pvalue < 0.05, set as "UP" 
+volcano$diffexpressed[volcano$logFC > 0.58 & volcano$P.Value < 0.05] <- "UP"
+# if log2Foldchange < -0.6 and pvalue < 0.05, set as "DOWN"
+volcano$diffexpressed[volcano$logFC < -0.58 & volcano$P.Value < 0.05] <- "DOWN"
+volcano$delabel <- NA
+volcano$delabel[volcano$diffexpressed != "NO"] <- volcano$Genes[volcano$diffexpressed != "NO"]
+library(ggrepel)
+volcano.plot <- ggplot(data=volcano, aes(x=logFC, y=-log10(P.Value), 
+                    col=diffexpressed, label=delabel)) +
+  ylab("-log10(P-value)") +
+  xlab("log2(Fold-Change)")+
+  ylim(0,5)+
+  xlim(-2.5, 2.5) +
+  geom_point() + 
+  theme_bw() +
+  geom_text_repel(size = 2, nudge_x = 0.05, 
+                  nudge_y = 0.05, check_overlap = T, 
+                  show.legend=FALSE, col="black") +
+  scale_color_manual(values=c("#1A85FF","gray54","#D41159"),
+                    name=NULL, labels=c("Downregulated",
+                                        "Non-differential",
+                                        "Upregulated")) +
+  geom_vline(xintercept=c(-0.58, 0.58), col="black", lty=2) +
+  geom_hline(yintercept=-log10(0.05), col="black", lty=2) +
+  annotate(geom = "text", label=paste0("Downregulated: ", length(down.proteins)),
+           col= "#1A85FF", x=-1.8, y=8, fontface= "bold") +
+  annotate(geom = "text", label=paste0("Upregulated: ", length(up.proteins)),
+           col= "#D41159", x=1.9, y=8, fontface= "bold")
+
+volcano.plot
+ggsave(plot= volcano.plot, "Figures/Volcano_GA.svg",height = 6,width = 8)
+ggsave(plot= volcano.plot, "Figures/Volcano_GA.pdf",height = 6,width = 8)
+ggsave(plot= volcano.plot, "Figures/Volcano_GA.png",height = 6,width = 8,
+       dpi= 1500)
+
+```
+
+
+## Comparative DEP analyses (non-BPD vs BPD and GA comparisons)
+
+```{r}
+
+dep.bpd <- read_xlsx("DEP_results_CvsBPD.xlsx")
+dep.GA <- read.table("DEP GA/dep.txt", sep = "\t")
+dep.GA <- dep.GA$V1
+
+# Compare both DEP results
+
+venn.comparison <- venndetail(list(DEP_GA= dep.GA, DEP_BPD= dep.bpd$`Protein ID`))
+r.comp <- result(venn.comparison)
+
+shared.dep <- dep.bpd[dep.bpd$`Protein ID` %in% r.comp$Detail[r.comp$Subset=="Shared"],]
+write_xlsx(shared.dep, "DEP GA/shared_bpd_GA_DEP.xlsx")
+
+ep.vp.exp <- ep.vp[shared.dep$`Protein ID`,]
+ep.vp.exp$`Protein ID` <- rownames(ep.vp.exp)
+ep.vp.exp$`Gene Name` <- shared.dep$`Gene Name`
+write_xlsx(ep.vp.exp, "DEP GA/shared_dep_GA_resultsGA.xlsx")
+
+```
+
+Plot
+
+```{r}
+
+plot(venn.comparison)
+
+```
+
+Save plot 
+
+```{r}
+
+pdf("DEP GA/shared_bpd_GA_dep_venn.pdf", height = 6, width = 7)
+plot(venn.comparison)
+dev.off()
+
+```
+
+
+# Study Population variable table
+
+```{r}
+
+hospitals <- sample.table.npa[,c(11,3)]
+
+sample.table.view <- sample.table.npa[,c(14:17,19:26,28,27,29,12,8,11)]
+sample.table.view <- sample.table.view %>%
+  mutate_at(c("GA..weeks.", "Days.of.VM.at.1.week","Days.of.hospitalization",
+              "Weight","CRIB.II"), 
+            as.numeric)
+
+# Hospitals
+
+hospitals %>%
+  tbl_summary(
+    by= Condition,
+    statistic = list(Center ~ "{n} ({p}%)"),   
+    type   = list(Center ~ "categorical"),
+    label = list(Center ~ "Hospital"),
+    sort = list(everything() ~ "frequency")) %>%
+  modify_header(label ~ "**Condition**") %>%
+  modify_caption("**Table. Patient Hospital of Origin**") %>%
+  add_overall() %>%
+  italicize_levels() %>%
+  as_gt() # %>%
+  # gt::gtsave(filename = "Tables/hospital_all_table.docx") # SAVE
+
+# Clinical table:
+
+sample.table.view %>%
+  tbl_summary(
+    by= Condition,
+    statistic = list(all_continuous() ~ "{mean} ({sd})",        
+                     BPD.grade ~ "{n} ({p}%)",
+                     Binary.Sex ~ "{n} ({p}%)"),   
+    digits = all_continuous() ~ 1,                            
+    type   = list(all_categorical() ~ "categorical",
+                  GA..weeks. ~ "continuous",
+                  Days.of.VM.at.1.week ~ "continuous",
+                  Weight ~ "continuous",
+                  CRIB.II ~ "continuous",
+                  Respiratory.modality.at.1.week ~ "categorical"),
+    label = list(Binary.Sex ~ "Sex, Female",
+                 GA..weeks. ~ "GA (weeks)",
+                 Weight ~ "Weight (g)",
+                 SGA ~ "SGA, Yes",
+                 CRIB.II ~ "CRIB II",
+                 Type.of.birth ~ "Type of birth",
+                 Maternal.Chorioamnionitis ~ "Maternal chorioamnionitis",
+                 Prenatal.corticosteroids ~ "Prenatal steroids",
+                 Surfactant ~ "Surfactant, Yes",
+                 Num.Dose.Surfactant ~ "Num. Dose Surfactant",
+                 Surf.adm.modality ~ "Sufactant administration modality",
+                 Sepsis ~ "Sepsis, Yes",
+                 Pneumotorax ~ "Pneumotorax, Yes",
+                 Days.of.VM.at.1.week ~ "Days of VM at 1 week",
+                 Respiratory.modality.at.1.week ~ "Respiratory modality at 1 week",
+                 BPD.grade ~ "BPD grade",
+                 Days.of.hospitalization ~ "Days of hospitalization")) %>%
+  modify_header(label ~ "**Condition**") %>%
+  modify_caption("**Table 1. Patient Clinical Characteristics**") %>%
+  add_p(test.args = Respiratory.modality.at.1.week ~ list(workspace=2e9)) %>%
+  bold_p() %>%
+  add_overall() %>%
+  italicize_levels() %>%
+  as_gt() %>%
+  gt::tab_source_note(gt::md("*SGA: Small for Gestational Age; VM: Mechanical Ventilation; IVM: Invasive Mechanical Ventilation; NIV: Non-Invasive Ventilation; nCPAP: nasal CPAP; HFNC: High Flow Nasal Cannula ; LFNG: Low Flow Nasal Cannula*")) #%>%
+  #gt::gtsave(filename = "Tables/Table_1_modality_npadec.docx") # SAVE
+
+
+sample.table.view.nodec <- sample.table.view[sample.table.view$Condition!="Deceased",]
+sample.table.view.nodec$Condition <- factor(sample.table.view.nodec$Condition,
+                                            levels = c("Control","BPD"))
+
+sample.table.view.nodec %>%
+  tbl_summary(
+    by= Condition,
+    statistic = list(all_continuous() ~ "{mean} ({sd})",        
+                     BPD.grade ~ "{n} ({p}%)",
+                     Binary.Sex ~ "{n} ({p}%)"),   
+    digits = all_continuous() ~ 1,                            
+    type   = list(all_categorical() ~ "categorical",
+                  GA..weeks. ~ "continuous",
+                  Days.of.VM.at.1.week ~ "continuous",
+                  Weight ~ "continuous",
+                  CRIB.II ~ "continuous",
+                  Respiratory.modality.at.1.week ~ "categorical"),
+    label = list(Binary.Sex ~ "Sex, Female",
+                 GA..weeks. ~ "GA (weeks)",
+                 Weight ~ "Weight (g)",
+                 SGA ~ "SGA, Yes",
+                 CRIB.II ~ "CRIB II",
+                 Type.of.birth ~ "Type of birth",
+                 Maternal.Chorioamnionitis ~ "Maternal chorioamnionitis",
+                 Prenatal.corticosteroids ~ "Prenatal steroids",
+                 Surfactant ~ "Surfactant, Yes",
+                 Num.Dose.Surfactant ~ "Num. Dose Surfactant",
+                 Surf.adm.modality ~ "Sufactant administration modality",
+                 Sepsis ~ "Sepsis, Yes",
+                 Pneumotorax ~ "Pneumotorax, Yes",
+                 Days.of.VM.at.1.week ~ "Days of VM at 1 week",
+                 Respiratory.modality.at.1.week ~ "Respiratory modality at 1 week",
+                 BPD.grade ~ "BPD grade",
+                 Days.of.hospitalization ~ "Days of hospitalization")) %>%
+  modify_header(label ~ "**Condition**") %>%
+  modify_caption("**Table 1. Patient Clinical Characteristics**") %>%
+  add_p(test.args = Respiratory.modality.at.1.week ~ list(workspace=2e9)) %>%
+  bold_p() %>%
+  add_overall() %>%
+  italicize_levels() %>%
+  as_gt() %>%
+  gt::tab_source_note(gt::md("*SGA: Small for Gestational Age; VM: Mechanical Ventilation; IVM: Invasive Mechanical Ventilation; NIV: Non-Invasive Ventilation; nCPAP: nasal CPAP; HFNC: High Flow Nasal Cannula ; LFNG: Low Flow Nasal Cannula*")) #%>%
+  #gt::gtsave(filename = "Tables/Table_1_modality_npaNOdec.docx") # SAVE
+
+```
+
+
+# Models (I have to try tidymodels)
+
+## Top 20:
+
+```{r}
+
+roc.prots <- read_excel("selected_final_proteins.xlsx")
+roc.frame <- proteins.npa.nd[roc.prots$ID,]
+rownames(roc.frame) <- roc.prots$`protein name`
+roc.frame <- roc.frame[1:20,]
+roc.frame <- as.data.frame(t(roc.frame))
+classy <- factor(sample.table.npa.nd$Condition, levels = c("Control","BPD"),
+                 labels = c("0","1"))
+fit.panel.20 <- glm(data= roc.frame, classy ~ .,
+                         family=binomial)
+
+summary(fit.panel.20)
+
+# R Square:
+r2.fp20 <- 1 - fit.panel.20$deviance/fit.panel.20$null.deviance
+
+# Visualization:
+
+par(pty="s")
+roc.20 <- roc(classy, fit.panel.20$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.23, 
+    grid=TRUE,
+    col="#D81B60", lwd=6)
+par(pty="m")
+
+coords(roc.20, x="best", ret=c("threshold", "specificity", "sensitivity","precision"))
+
+
+ci.se(roc.20, specificities = seq(0, 1, .1) * ifelse(roc.20$percent, 100, 1), 
+      conf.level=0.95, boot.n=2000, 
+      boot.stratified=TRUE, 
+      progress=getOption("pROCProgress")$name, 
+      parallel=FALSE)
+ci.sp(roc.20, sensitivities = seq(0, 1, .1) * ifelse(roc.20$percent, 100, 1), 
+      conf.level=0.95, boot.n=2000, 
+      boot.stratified=TRUE, 
+      progress=getOption("pROCProgress")$name, 
+      parallel=FALSE)
+ci.thresholds(roc.20, conf.level=0.95, boot.n=2000, 
+              boot.stratified=TRUE, thresholds = "local maximas", 
+              progress=getOption("pROCProgress")$name, 
+              parallel=FALSE)
+ci.coords(roc.20, x="best", input=c("threshold", "specificity", "sensitivity"), 
+          ret=c("threshold", "specificity", "sensitivity","precision"), 
+          best.method=c("youden", "closest.topleft"), 
+          best.weights=c(1, 0.5), 
+          best.policy = c("stop", "omit", "random"), 
+          conf.level=0.95, boot.n=2000, boot.stratified=TRUE, 
+          progress=getOption("pROCProgress")$name)
+
+```
+
+## Top 15:
+
+```{r}
+
+fit.panel.15 <- glm(data= roc.frame[,1:15], classy ~ .,
+                         family=binomial)
+r2.fp15 <- 1 - fit.panel.15$deviance/fit.panel.15$null.deviance
+par(pty="s")
+roc.15 <- roc(classy, fit.panel.15$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.23, 
+    grid=TRUE,
+    col="#D81B60", lwd=6)
+par(pty="m")
+
+```
+
+## Top 10:
+
+```{r}
+
+fit.panel.10 <- glm(data= roc.frame[,1:10], classy ~ .,
+                         family=binomial)
+r2.fp10 <- 1 - fit.panel.10$deviance/fit.panel.10$null.deviance
+par(pty="s")
+roc.10 <- roc(classy, fit.panel.10$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.23, 
+    grid=TRUE,
+    col="#D81B60", lwd=6)
+par(pty="m")
+
+```
+
+## Top 5:
+
+```{r}
+
+fit.panel.5 <- glm(data= roc.frame[,1:5], classy ~ .,
+                         family=binomial)
+r2.fp5 <- 1 - fit.panel.5$deviance/fit.panel.5$null.deviance
+par(pty="s")
+roc.5 <- roc(classy, fit.panel.5$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.23, 
+    grid=TRUE,
+    col="#D81B60", lwd=6)
+par(pty="m")
+
+```
+
+
+## Top 3: 
+
+```{r}
+
+roc.f.top3 <- roc.frame[,c("KRT2","DPYSL2","H2BC12")]
+
+fit.panel.3 <- glm(data= roc.f.top3, classy ~ .,
+                         family=binomial)
+
+summary(fit.panel.3)
+
+# R Square:
+
+r2.fp3 <- 1 - fit.panel.3$deviance/fit.panel.3$null.deviance
+
+# Visualization:
+
+par(pty="s")
+roc.3<- roc(classy, fit.panel.3$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.23, 
+    grid=TRUE,
+    col="#D81B60", lwd=6)
+par(pty="m")
+
+```
+
+
+
+## Top 4: 
+
+```{r}
+
+roc.f.top4 <- roc.frame[,c("KRT2","DPYSL2","H2BC12","LDLR")]
+
+fit.panel.4 <- glm(data= roc.f.top4, classy ~ .,
+                         family=binomial)
+
+summary(fit.panel.4)
+
+# R Square:
+
+r2.fp4 <- 1 - fit.panel.4$deviance/fit.panel.4$null.deviance
+
+# Visualization:
+
+par(pty="s")
+roc.4 <- roc(classy, fit.panel.4$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.23, 
+    grid=TRUE,
+    col="#D81B60", lwd=6)
+par(pty="m")
+
+```
+
+
+## Top 7: 
+
+```{r}
+
+roc.f.top7 <- roc.frame[,c("KRT2","DPYSL2","H2BC12","LDLR",
+                           "KRT1","TFF3","HDGFL2")]
+
+fit.panel.7 <- glm(data= roc.f.top7, classy ~ .,
+                         family=binomial)
+
+summary(fit.panel.7)
+
+# R Square:
+
+r2.fp7 <- 1 - fit.panel.7$deviance/fit.panel.7$null.deviance
+
+# Visualization:
+
+par(pty="s")
+roc.7 <- roc(classy, fit.panel.7$fitted.values, plot=TRUE,
+    legacy.axes=TRUE,print.auc=TRUE,print.auc.x=.4,print.auc.y=0.23, 
+    grid=TRUE,ci=TRUE,
+    col="#D81B60", lwd=6)
+par(pty="m")
+
+```
+
+## ROC TABLE
+
+```{r}
+
+rocs.to.do <- c("roc.3","roc.4","roc.7","roc.5","roc.10","roc.15","roc.20")
+
+roc.frame.df <- data.frame()
+
+coords.3 <- as.data.frame(ci.coords(roc.3, x="best", input=c("threshold", 
+                                                             "specificity", 
+                                                             "sensitivity"), 
+          ret=c("threshold", "specificity", "sensitivity","precision"), 
+          best.method=c("youden", "closest.topleft"), 
+          best.weights=c(1, 0.5), 
+          best.policy = c("stop", "omit", "random"), 
+          conf.level=0.95, boot.n=2000, boot.stratified=TRUE, 
+          progress=getOption("pROCProgress")$name))
+coords.4 <- as.data.frame(ci.coords(roc.4, x="best", input=c("threshold", 
+                                                             "specificity", 
+                                                             "sensitivity"), 
+          ret=c("threshold", "specificity", "sensitivity","precision"), 
+          best.method=c("youden", "closest.topleft"), 
+          best.weights=c(1, 0.5), 
+          best.policy = c("stop", "omit", "random"), 
+          conf.level=0.95, boot.n=2000, boot.stratified=TRUE, 
+          progress=getOption("pROCProgress")$name))
+coords.7 <- as.data.frame(ci.coords(roc.7, x="best", input=c("threshold", 
+                                                             "specificity", 
+                                                             "sensitivity"), 
+          ret=c("threshold", "specificity", "sensitivity","precision"), 
+          best.method=c("youden", "closest.topleft"), 
+          best.weights=c(1, 0.5), 
+          best.policy = c("stop", "omit", "random"), 
+          conf.level=0.95, boot.n=2000, boot.stratified=TRUE, 
+          progress=getOption("pROCProgress")$name))
+coords.5 <- as.data.frame(ci.coords(roc.5, x="best", input=c("threshold", 
+                                                             "specificity", 
+                                                             "sensitivity"), 
+          ret=c("threshold", "specificity", "sensitivity","precision"), 
+          best.method=c("youden", "closest.topleft"), 
+          best.weights=c(1, 0.5), 
+          best.policy = c("stop", "omit", "random"), 
+          conf.level=0.95, boot.n=2000, boot.stratified=TRUE, 
+          progress=getOption("pROCProgress")$name))
+coords.10 <- as.data.frame(ci.coords(roc.10, x="best", input=c("threshold", 
+                                                             "specificity", 
+                                                             "sensitivity"), 
+          ret=c("threshold", "specificity", "sensitivity","precision"), 
+          best.method=c("youden", "closest.topleft"), 
+          best.weights=c(1, 0.5), 
+          best.policy = c("stop", "omit", "random"), 
+          conf.level=0.95, boot.n=2000, boot.stratified=TRUE, 
+          progress=getOption("pROCProgress")$name))
+coords.15 <- as.data.frame(ci.coords(roc.15, x="best", input=c("threshold", 
+                                                             "specificity", 
+                                                             "sensitivity"), 
+          ret=c("threshold", "specificity", "sensitivity","precision"), 
+          best.method=c("youden", "closest.topleft"), 
+          best.weights=c(1, 0.5), 
+          best.policy = c("stop", "omit", "random"), 
+          conf.level=0.95, boot.n=2000, boot.stratified=TRUE, 
+          progress=getOption("pROCProgress")$name))
+coords.20 <- as.data.frame(ci.coords(roc.20, x="best", input=c("threshold", 
+                                                               "specificity", 
+                                                               "sensitivity"), 
+          ret=c("threshold", "specificity", "sensitivity","precision"), 
+          best.method=c("youden", "closest.topleft"), 
+          best.weights=c(1, 0.5), 
+          best.policy = c("stop", "omit", "random"), 
+          conf.level=0.95, boot.n=2000, boot.stratified=TRUE, 
+          progress=getOption("pROCProgress")$name))
+
+roc.frame.df <- rbind(coords.3,coords.4,coords.7,
+                   coords.5,coords.10,coords.15,coords.20)
+rownames(roc.frame.df) <- rocs.to.do
+roc.frame.df <- roc.frame.df[,-c(1:3)]
+roc.frame.df <- roc.frame.df %>%
+  mutate(Specificity= paste0(round(specificity.50.,digits = 3)," (",
+                             round(specificity.2.5.,digits = 3),"-",
+                             round(specificity.97.5.,digits = 3),")"),
+         Sensitivity= paste0(round(sensitivity.50.,digits = 3)," (",
+                             round(sensitivity.2.5.,digits = 3),"-",
+                             round(sensitivity.97.5.,digits = 3),")"),
+         Precision= paste0(round(precision.50.,digits = 3)," (",
+                           round(precision.2.5.,digits = 3),"-",
+                           round(precision.97.5.,digits = 3),")"))
+r2.general <- c(r2.fp3, r2.fp4, r2.fp7,r2.fp5,r2.fp10,r2.fp15,r2.fp20)
+roc.frame.df <- roc.frame.df[,c(10:12)]
+roc.frame.df$R2 <- round(r2.general, digits = 3)
+roc.frame.df$ROCS <- c("Top 3","Top 4", "Top 7","Top 5","Top 10","Top 15","Top 20")
+roc.frame.df <- roc.frame.df[,c(5,1:4)]
+write_xlsx(roc.frame.df, "Tables/rocs_analysis.xlsx")
+
+```
+
+
+## ROC tests:
+
+```{r}
+
+roc.test(roc.3, roc.4, method="delong") # 0.047 YES
+roc.test(roc.3, roc.7, method="delong") # 0.008 YES
+roc.test(roc.4, roc.7, method="delong") # 0.073 NO
+roc.test(roc.7, roc.20, method="delong") # 0.009 YES
+
+```
+
