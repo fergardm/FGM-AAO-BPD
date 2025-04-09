@@ -110,7 +110,7 @@ samples <- samples %>% mutate(cond_type=case_when(jensen_condition=="control" & 
 
 samples$cond_type <- as.factor(samples$cond_type)
 samples <- samples[samples$new_sample %in% colnames(df_protein),]
-
+samples$hospital_abrev <- as.factor(samples$hospital_abrev)
 # Before order, we must keep only the samples we'll need in this experiment:
 
 df_new_prot <- df_protein[,colnames(df_protein) %in% samples$new_sample]
@@ -278,6 +278,8 @@ summary(conditions)
 
 ```
 
+#### Regular PCA
+
 ```{r}
 
 set.seed(222)
@@ -296,6 +298,70 @@ plotIndiv(pca, comp = c(1, 2), ind.names = F,
           col.per.group =  c("#FFC20A", "#0C7BDC"))
 dev.off()
 ```
+
+#### Hospital PCA (no deceased)
+
+```{r}
+
+hospitals <- samples$hospital_abrev[samples$cond_type!="NPA Deceased"]
+
+plotIndiv(pca, comp = c(1, 2), ind.names = F, 
+          group = hospitals,  
+          legend = TRUE, title = 'PCA comp 1 - 2')
+
+svglite::svglite("Figuras adicionales CHEST/PCA_hospitals.svg")
+plotIndiv(pca, comp = c(1, 2), ind.names = F, 
+          group = hospitals, 
+          ellipse = T, 
+          ellipse.level = 0.95,
+          legend = TRUE, title = 'PCA comp 1 - 2')
+dev.off()
+pdf("Figuras adicionales CHEST/PCA_hospitals.pdf", width = 7, height = 6)
+plotIndiv(pca, comp = c(1, 2), ind.names = F, 
+          group = hospitals,
+          ellipse = T, 
+          ellipse.level = 0.95,
+          legend = TRUE, title = 'PCA comp 1 - 2')
+dev.off()
+
+```
+
+
+
+#### Hospital PCA (deceased)
+
+```{r}
+
+hospitals.dec <- samples$hospital_abrev
+
+protein_matrix_dec <- t(protein_log_filter)
+protein_matrix_dec <- scale(protein_matrix_dec, center = FALSE, scale = TRUE)
+
+pca.dec <- pca(protein_matrix_dec,ncomp = 2, center = TRUE, scale = TRUE,
+           max.iter = 100)
+
+plotIndiv(pca.dec, comp = c(1, 2), ind.names = F, 
+          group = hospitals.dec,  
+          legend = TRUE, title = 'PCA comp 1 - 2')
+
+svglite::svglite("Figuras adicionales CHEST/PCA_hospitals_dec.svg")
+plotIndiv(pca.dec, comp = c(1, 2), ind.names = F, 
+          group = hospitals.dec, 
+          ellipse = T, 
+          ellipse.level = 0.95,
+          legend = TRUE, title = 'PCA comp 1 - 2')
+dev.off()
+pdf("Figuras adicionales CHEST/PCA_hospitals_dec.pdf", width = 7, height = 6)
+plotIndiv(pca.dec, comp = c(1, 2), ind.names = F, 
+          group = hospitals.dec,
+          ellipse = T, 
+          ellipse.level = 0.95,
+          legend = TRUE, title = 'PCA comp 1 - 2')
+dev.off()
+
+```
+
+
 
 ### PLS-DA
 
@@ -426,7 +492,7 @@ set.seed(222)
 
 final.splsda <- splsda(protein_matrix, conditions, 
                        ncomp = 2,
-                       keepX = optimal.keepX) 
+                       keepX = c(10,300)) 
 
 ```
 
@@ -473,7 +539,7 @@ Y.test <- conditions[test]
 
 # Train model
 
-train.splsda.protein <- splsda(X.train, Y.train, ncomp = 3, keepX = optimal.keepX) 
+train.splsda.protein <- splsda(X.train, Y.train, ncomp = 3, keepX = c(10,300)) 
 
 # Use model in Test
 
@@ -490,7 +556,12 @@ table(factor(predict.comp1, levels = levels(conditions)), Y.test)
 predict.comp2 <- predict.splsda.protein$class$mahalanobis.dist[,2]
 table(factor(predict.comp2, levels = levels(conditions)), Y.test)
 
-
+# Permutation test:
+library(RVAideMemoire)
+MVA.cmv(protein_matrix,conditions, model = "PLS-DA",progress = TRUE,
+         ncomp = 2,crit.inn="NMC")
+MVA.test(protein_matrix,conditions, model = "PLS-DA", nperm = 1000, progress = TRUE,
+         ncomp = 2,p.method = "fdr", cmv = TRUE)
 ```
 
 #### Plot ROC curve
