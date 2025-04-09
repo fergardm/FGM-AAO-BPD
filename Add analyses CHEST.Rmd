@@ -13,7 +13,7 @@ if (!requireNamespace("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 library(tidyverse)
 library(factoextra)
-library(´FactoMineR)
+library(FactoMineR)
 library(stringr)
 library(readxl)
 library(writexl)
@@ -1123,6 +1123,245 @@ roc.test(roc.3, roc.4, method="delong") # 0.047 YES
 roc.test(roc.3, roc.7, method="delong") # 0.008 YES
 roc.test(roc.4, roc.7, method="delong") # 0.073 NO
 roc.test(roc.7, roc.20, method="delong") # 0.009 YES
+
+```
+
+# PRIORITY BIOMARKER ANALYSIS: 
+
+```{r}
+
+cod.hospitals <- sample.table.npa.nd[,c(1,5)]
+cod.hospitals$Center.p.code <- factor(cod.hospitals$Center.p.code, levels = c("01","02","03",
+                                                                "04","05","06",
+                                                                "07"))
+priority.frame <- as.data.frame(t(roc.frame))
+priority.prots <- c("KRT2","DPYSL2","H2BC12","LDLR",
+                               "KRT1","TFF3","HDGFL2")
+
+get.boxes <- function(data, proteins, groups){
+  # data: a data frame filled with proteins (rowns) and samples (columns)
+  # proteins: a list of interesting proteins from out study
+  # groups: groups (conditions, treatments) our samples are related with
+  box.data <- as.data.frame(t(data[proteins,]))
+  for (i in colnames(box.data)){
+    res <- ggplot(box.data) +
+      aes(x = groups, y = box.data[,i], fill = groups) +
+      stat_boxplot(geom="errorbar", width= 0.25) +
+      geom_boxplot() +
+      theme(legend.position = "right", plot.title = element_text(size = 14, face = "bold")) +
+      labs(x="Hospitals", y= "log(Protein Intensities)") +
+      scale_fill_manual(labels = c("01","02","03","04","05","06","07"),
+                        values = c("black", "#FF2C79", "#178F92", "#75D6FF",
+                                   "#FFC857","#412234","#BDD9BF")) +
+      guides(fill=guide_legend(title="Hospitals")) + 
+      ggtitle(paste0(i))
+    plot(res)
+    ggsave(plot = res, paste0("PriorityBox/",i,".svg"), height = 7, 
+           width = 9)
+    ggsave(plot = res, paste0("PriorityBox/",i,".pdf"), height = 7,
+           width = 9)
+    ggsave(plot = res, paste0("PriorityBox/",i,".png"), height = 7, 
+           width = 9,
+           dpi = 1500)
+  }
+}
+
+get.boxes(data = priority.frame, proteins = priority.prots, 
+                   groups = cod.hospitals$Center.p.code)
+
+
+# Perform ANOVA: 
+library(rstatix)
+library(ggpubr)
+cod.hospitals <- cod.hospitals[order(cod.hospitals$Center.p.code),]
+prioprotframe <- priority.frame[priority.prots,cod.hospitals$Proteo.samples]
+prioprotframe <- as.data.frame(t(prioprotframe))
+hospital.biomarker <- cbind(cod.hospitals, prioprotframe)
+
+hospital.biomarker %>%
+  group_by(Center.p.code) %>%
+  get_summary_stats(KRT2, type = "mean_sd")
+hospital.biomarker %>%
+  group_by(Center.p.code) %>%
+  get_summary_stats(H2BC12, type = "mean_sd")
+
+# Build the linear model
+model  <- lm(KRT2 ~ Center.p.code, data = hospital.biomarker)
+# Create a QQ plot of residuals
+ggqqplot(residuals(model))
+shapiro_test(residuals(model))
+plot(model, 1)
+
+# Build the linear model H2BC12
+model2  <- lm(H2BC12 ~ Center.p.code, data = hospital.biomarker)
+# Create a QQ plot of residuals
+ggqqplot(residuals(model2))
+shapiro_test(residuals(model2))
+plot(model2, 1)
+
+res.aov.KRT2 <- hospital.biomarker %>% anova_test(KRT2 ~ Center.p.code)
+res.aov.KRT2
+pwc.KRT2 <- hospital.biomarker %>% tukey_hsd(KRT2 ~ Center.p.code)
+pwc.KRT2
+# Visualization: box plots with p-values
+pwc.KRT2 <- pwc.KRT2 %>% add_xy_position(x = "Center.p.code")
+anoboxKRT2 <- ggboxplot(hospital.biomarker, x = "Center.p.code", y = "KRT2") +
+  stat_pvalue_manual(pwc.KRT2, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(res.aov.KRT2, detailed = TRUE),
+    caption = get_pwc_label(pwc.KRT2)
+    )
+ggsave(plot = anoboxKRT2, paste0("PriorityBox/anoboxKRT2.pdf"), height = 7,
+           width = 9)
+res.aov.DPYSL2 <- hospital.biomarker %>% anova_test(DPYSL2 ~ Center.p.code)
+res.aov.DPYSL2
+pwc.DPYSL2 <- hospital.biomarker %>% tukey_hsd(DPYSL2 ~ Center.p.code)
+pwc.DPYSL2
+pwc.DPYSL2 <- pwc.DPYSL2 %>% add_xy_position(x = "Center.p.code")
+anoboxDPYSL2 <- ggboxplot(hospital.biomarker, x = "Center.p.code", y = "DPYSL2") +
+  stat_pvalue_manual(pwc.DPYSL2, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(res.aov.DPYSL2, detailed = TRUE),
+    caption = get_pwc_label(pwc.DPYSL2)
+    )
+ggsave(plot = anoboxDPYSL2, paste0("PriorityBox/anoboxDPYSL2.pdf"), height = 7,
+           width = 9)
+
+res.aov.H2BC12 <- hospital.biomarker %>% anova_test(H2BC12 ~ Center.p.code)
+res.aov.H2BC12
+pwc.H2BC12 <- hospital.biomarker %>% tukey_hsd(H2BC12 ~ Center.p.code)
+pwc.H2BC12
+pwc.H2BC12 <- pwc.H2BC12 %>% add_xy_position(x = "Center.p.code")
+anoboxH2BC12 <-ggboxplot(hospital.biomarker, x = "Center.p.code", y = "H2BC12") +
+  stat_pvalue_manual(pwc.H2BC12, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(res.aov.H2BC12, detailed = TRUE),
+    caption = get_pwc_label(pwc.H2BC12)
+    )
+ggsave(plot = anoboxH2BC12, paste0("PriorityBox/anoboxH2BC12.pdf"), height = 7,
+           width = 9)
+
+```
+
+
+# PRIORITY BIOMARKER ANALYSIS 2 (with deceased population): 
+
+```{r}
+
+cod.hospitals <- sample.table.npa[,c(1,5)]
+cod.hospitals$Center.p.code <- factor(cod.hospitals$Center.p.code, levels = c("01","02","03",
+                                                                "04","05","06",
+                                                                "07"))
+roc.frame <- proteins[roc.prots$ID,]
+rownames(roc.frame) <- roc.prots$`protein name`
+roc.frame <- roc.frame[1:20,]
+roc.frame <- as.data.frame(t(roc.frame))
+priority.frame <- as.data.frame(t(roc.frame))
+priority.prots <- c("KRT2","DPYSL2","H2BC12","LDLR",
+                               "KRT1","TFF3","HDGFL2")
+
+get.boxes <- function(data, proteins, groups){
+  # data: a data frame filled with proteins (rowns) and samples (columns)
+  # proteins: a list of interesting proteins from out study
+  # groups: groups (conditions, treatments) our samples are related with
+  box.data <- as.data.frame(t(data[proteins,]))
+  for (i in colnames(box.data)){
+    res <- ggplot(box.data) +
+      aes(x = groups, y = box.data[,i], fill = groups) +
+      stat_boxplot(geom="errorbar", width= 0.25) +
+      geom_boxplot() +
+      theme(legend.position = "right", plot.title = element_text(size = 14, face = "bold")) +
+      labs(x="Hospitals", y= "log(Protein Intensities)") +
+      scale_fill_manual(labels = c("01","02","03","04","05","06","07"),
+                        values = c("black", "#FF2C79", "#178F92", "#75D6FF",
+                                   "#FFC857","#412234","#BDD9BF")) +
+      guides(fill=guide_legend(title="Hospitals")) + 
+      ggtitle(paste0(i))
+    plot(res)
+    ggsave(plot = res, paste0("PriorityBox/",i,".svg"), height = 7, 
+           width = 9)
+    ggsave(plot = res, paste0("PriorityBox/",i,".pdf"), height = 7,
+           width = 9)
+    ggsave(plot = res, paste0("PriorityBox/",i,".png"), height = 7, 
+           width = 9,
+           dpi = 1500)
+  }
+}
+
+get.boxes(data = priority.frame, proteins = priority.prots, 
+                   groups = cod.hospitals$Center.p.code)
+
+
+# Perform ANOVA: 
+library(rstatix)
+library(ggpubr)
+cod.hospitals <- cod.hospitals[order(cod.hospitals$Center.p.code),]
+prioprotframe <- priority.frame[priority.prots,cod.hospitals$Proteo.samples]
+prioprotframe <- as.data.frame(t(prioprotframe))
+hospital.biomarker <- cbind(cod.hospitals, prioprotframe)
+
+hospital.biomarker %>%
+  group_by(Center.p.code) %>%
+  get_summary_stats(KRT2, type = "mean_sd")
+hospital.biomarker %>%
+  group_by(Center.p.code) %>%
+  get_summary_stats(H2BC12, type = "mean_sd")
+
+# Build the linear model
+model  <- lm(KRT2 ~ Center.p.code, data = hospital.biomarker)
+# Create a QQ plot of residuals
+ggqqplot(residuals(model))
+shapiro_test(residuals(model))
+plot(model, 1)
+
+# Build the linear model H2BC12
+model2  <- lm(H2BC12 ~ Center.p.code, data = hospital.biomarker)
+# Create a QQ plot of residuals
+ggqqplot(residuals(model2))
+shapiro_test(residuals(model2))
+plot(model2, 1)
+
+res.aov.KRT2 <- hospital.biomarker %>% anova_test(KRT2 ~ Center.p.code)
+res.aov.KRT2
+pwc.KRT2 <- hospital.biomarker %>% tukey_hsd(KRT2 ~ Center.p.code)
+pwc.KRT2
+# Visualization: box plots with p-values
+pwc.KRT2 <- pwc.KRT2 %>% add_xy_position(x = "Center.p.code")
+anoboxKRT2 <- ggboxplot(hospital.biomarker, x = "Center.p.code", y = "KRT2") +
+  stat_pvalue_manual(pwc.KRT2, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(res.aov.KRT2, detailed = TRUE),
+    caption = get_pwc_label(pwc.KRT2)
+    )
+ggsave(plot = anoboxKRT2, paste0("PriorityBox/anoboxKRT2.pdf"), height = 7,
+           width = 9)
+res.aov.DPYSL2 <- hospital.biomarker %>% anova_test(DPYSL2 ~ Center.p.code)
+res.aov.DPYSL2
+pwc.DPYSL2 <- hospital.biomarker %>% tukey_hsd(DPYSL2 ~ Center.p.code)
+pwc.DPYSL2
+pwc.DPYSL2 <- pwc.DPYSL2 %>% add_xy_position(x = "Center.p.code")
+anoboxDPYSL2 <- ggboxplot(hospital.biomarker, x = "Center.p.code", y = "DPYSL2") +
+  stat_pvalue_manual(pwc.DPYSL2, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(res.aov.DPYSL2, detailed = TRUE),
+    caption = get_pwc_label(pwc.DPYSL2)
+    )
+ggsave(plot = anoboxDPYSL2, paste0("PriorityBox/anoboxDPYSL2.pdf"), height = 7,
+           width = 9)
+
+res.aov.H2BC12 <- hospital.biomarker %>% anova_test(H2BC12 ~ Center.p.code)
+res.aov.H2BC12
+pwc.H2BC12 <- hospital.biomarker %>% tukey_hsd(H2BC12 ~ Center.p.code)
+pwc.H2BC12
+pwc.H2BC12 <- pwc.H2BC12 %>% add_xy_position(x = "Center.p.code")
+anoboxH2BC12 <-ggboxplot(hospital.biomarker, x = "Center.p.code", y = "H2BC12") +
+  stat_pvalue_manual(pwc.H2BC12, hide.ns = TRUE) +
+  labs(
+    subtitle = get_test_label(res.aov.H2BC12, detailed = TRUE),
+    caption = get_pwc_label(pwc.H2BC12)
+    )
+ggsave(plot = anoboxH2BC12, paste0("PriorityBox/anoboxH2BC12.pdf"), height = 7,
+           width = 9)
 
 ```
 
